@@ -1,0 +1,1775 @@
+---
+title: "TAC Analysis"
+author: "Prashant Kumar"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: right
+    embed-resources: true
+editor: source
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(gt)
+library(ggplot2)
+library(openxlsx)
+library(tidyverse)
+library(ropls)  # For PLS-DA
+library(pheatmap)
+library(RColorBrewer)
+library(ggpubr)
+library(factoextra)
+library(FactoMineR)
+library(limma)
+library(igraph)
+library(WGCNA)
+library(ggraph)
+library(pathview)
+library(clusterProfiler)
+library(tibble)
+library(corrplot)
+library(ggforce)
+library(ggrepel)
+```
+
+
+```{r echo=FALSE}
+# setwd("E:/Ajit data analysis/Tac") 
+
+Fecal1 <- read_excel("E:/Ajit data analysis/Tac/Fecal metablomics 2022 set 1.xlsx")
+
+metabolites <- colnames(Fecal1)[-c(1, 2)]
+clean_names <- gsub("[() ]", "_", metabolites)
+colnames(Fecal1)[-c(1, 2)] <- clean_names
+
+Fecal1 <- Fecal1 %>%
+  mutate(
+    Group = case_when(
+      grepl("WT-Sham", Sample) ~ "Sham",
+      grepl("WT-TAC-FMT-V", Sample) ~ "TAC_FMT_V",
+      grepl("WT-TAC-FMT-S", Sample) ~ "TAC_FMT_S",
+      grepl("WT-TAC-V", Sample) ~ "TAC_V",
+      grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
+      TRUE ~ "Other"
+    ), .after = "Sample"
+  ) %>% 
+  mutate(Group = as.factor(Group))
+
+table(Fecal1$Group)
+
+
+sample_info <- Fecal1 %>% select(Sample, Group) %>% mutate(Group = as.factor(Group))
+metabolite_Fecal1 <- Fecal1 %>% select(-Group)
+
+
+# rownames(metabolite_Fecal1) <- metabolite_Fecal1$Sample
+# metabolite_Fecal1 <- metabolite_Fecal1 %>% select(-Sample)
+
+metabolite_Fecal1 <- metabolite_Fecal1 %>% column_to_rownames("Sample")
+
+# Transpose to have metabolites as rows
+metabolite_Fecal1_t <- t(metabolite_Fecal1)
+# colnames(metabolite_Fecal1_t) <- rownames(metabolite_Fecal1)
+# rownames(metabolite_Fecal1_t) <- colnames(metabolite_Fecal1)
+```
+
+
+## Multivariate Analysis
+```{r}
+# Partial Least Squares Discriminant Analysis (plsda)
+# Scale and center Fecal1
+scaled_Fecal1 <- scale(metabolite_Fecal1)
+
+# PCA
+pca_result <- prcomp(scaled_Fecal1, scale. = TRUE)
+pca_summary <- summary(pca_result)
+
+# PCA visualization
+pca_plot <- fviz_pca_ind(pca_result,
+                         geom = "point",
+                         habillage = sample_info$Group,
+                         palette = brewer.pal(length(unique(sample_info$Group)), "Set1"),
+                         addEllipses = TRUE,
+                         ellipse.level = 0.95) +
+  labs(title = "PCA of Metabolite Profiles") +
+  theme_minimal() + 
+  theme(
+    panel.background = element_rect(fill = "white"), 
+    plot.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "gray", size = 0.5), 
+    panel.grid.minor = element_line(color = "gray", size = 0.25)  
+  )
+# ggsave("E:/Ajit data analysis/Tac/fecal set1/pca_plot.png",
+#          width = 20, height = 15)
+pca_plot
+
+# PLS-DA (Partial Least Squares Discriminant Analysis)
+plsda_result <- opls(scaled_Fecal1, 
+                    as.factor(sample_info$Group),
+                    predI = 2,
+                    orthoI = 0)
+
+plsda_result
+# png("E:/Ajit data analysis/Tac/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
+# plot(plsda_result)
+# 
+# dev.off()
+
+# Extract PLS-DA scores for plotting
+plsda_scores <- getScoreMN(plsda_result)
+plsda_Fecal1 <- as.data.frame(plsda_scores) %>%
+  mutate(Group = sample_info$Group)
+
+# Plot PLS-DA
+plsda_plot <- ggplot(plsda_Fecal1, aes(x = p1, y = p2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  stat_ellipse(level = 0.95) +
+  labs(
+    title = "PLS-DA of Metabolite Profiles",
+    x = "Component 1",
+    y = "Component 2"
+  ) +
+  theme_minimal() + 
+    theme(
+    panel.background = element_rect(fill = "white"), 
+    plot.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "gray", size = 0.5), 
+    panel.grid.minor = element_line(color = "gray", size = 0.25)  
+  ) +
+  scale_color_brewer(palette = "Set1")
+plsda_plot
+# ggsave("E:/Ajit data analysis/Tac/fecal set1/plsda_plot.png", width = 20, height = 15)
+
+```
+
+
+## Correlation and Association Analysis for Fecal Metabolomics Data
+```{r}
+# correlation matrix (Pearson)
+cor_matrix <- cor(metabolite_Fecal1, method = "pearson", use = "pairwise.complete.obs")
+
+# calculating correlation matrix (Spearman)
+spearman_cor_matrix <- cor(metabolite_Fecal1, method = "spearman", use = "pairwise.complete.obs")
+
+# Function to find strong correlations
+find_strong_correlations <- function(cor_matrix, threshold = 0.70) {
+  # Converting to long format
+  cor_data <- as.data.frame(cor_matrix) %>%
+    rownames_to_column("Metabolite1") %>%
+    pivot_longer(-Metabolite1, names_to = "Metabolite2", values_to = "Correlation") %>%
+    filter(Metabolite1 != Metabolite2) %>%  # Remove self-correlations
+    filter(abs(Correlation) >= threshold) %>%
+    arrange(desc(abs(Correlation)))
+  
+  # Removing duplicates (A-B vs B-A)
+  cor_data <- cor_data %>%
+    mutate(
+      Met_pair = pmap_chr(list(Metabolite1, Metabolite2), 
+                         ~paste(sort(c(..1, ..2)), collapse="-"))
+    ) %>%
+    distinct(Met_pair, .keep_all = TRUE) %>%
+    select(-Met_pair)
+  
+  return(cor_data)
+}
+
+# Find strong correlations
+strong_cors <- find_strong_correlations(cor_matrix, 0.70) # if correlation is greater than 0.70
+print("Top strong correlations (|r| >= 0.70):")
+print(head(strong_cors, 50))
+
+# Visualize correlation matrix for top variable metabolites
+visualize_correlation_heatmap <- function(cor_matrix, n_top = 30) {
+  # calculating variance for each metabolite
+  metabolite_vars <- apply(metabolite_Fecal1, 2, var, na.rm = TRUE)
+  
+  # Getting top n variable metabolites
+  top_metabolites <- names(sort(metabolite_vars, decreasing = TRUE))[1:n_top]
+  
+  # Subset correlation matrix
+  cor_subset <- cor_matrix[top_metabolites, top_metabolites]
+  
+  # creating heatmap
+  pheatmap(cor_subset,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           display_numbers = FALSE,
+           fontsize_row = 8,
+           fontsize_col = 8,
+           main = "Correlation Heatmap of Top Variable Metabolites")
+  
+  # Also creating corrplot for alternative visualization
+  corrplot(cor_subset, method = "circle", type = "upper", 
+           order = "hclust", tl.col = "black", tl.cex = 0.7,
+           title = "Correlation Plot of Top Variable Metabolites")
+  
+  return(top_metabolites)
+}
+
+# Visualize correlation heatmap
+#top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 25)
+# ggsave("E:/Ajit data analysis/Tac/fecal set1/correlation_heatmap.png", 
+#        plot = top_var_metabolites, 
+#        width = 20, height = 15, 
+#        units = "in", 
+#        dpi = 600,  
+#        bg = "white") 
+
+# png("E:/Ajit data analysis/Tac/fecal set1/top_metabolite_corrplot.png", 
+#     width = 20, height = 15, 
+#     units = "in", res = 300)
+visualize_correlation_heatmap(cor_matrix, 30)
+
+# dev.off()
+
+```
+
+```{r include=FALSE}
+visualize_correlation_heatmap <- function(cor_matrix, n_top = 30, save_path = NULL) {
+  metabolite_vars <- apply(metabolite_Fecal1, 2, var, na.rm = TRUE)
+  
+  top_metabolites <- names(sort(metabolite_vars, decreasing = TRUE))[1:n_top]
+  
+  cor_subset <- cor_matrix[top_metabolites, top_metabolites]
+  
+
+  if (!is.null(save_path)) {
+
+    pdf(file = save_path, width = 12, height = 10)
+  }
+  
+
+  pheatmap(cor_subset,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           display_numbers = FALSE,
+           fontsize_row = 8,
+           fontsize_col = 8,
+           main = "Correlation Heatmap of Top Variable Metabolites")
+  par(mar = c(5, 4, 7, 2)) 
+  corrplot(cor_subset, method = "circle", type = "upper", 
+           order = "hclust", tl.col = "black", tl.cex = 0.7,
+           title = "Correlation Plot of Top Variable Metabolites")
+  
+  if (!is.null(save_path)) {
+    dev.off()
+  }
+  
+  return(top_metabolites)
+}
+
+top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 30, 
+                                                     save_path = 
+                                                       "E:/Ajit data analysis/Tac/fecal set1/correlation_heatmap.pdf")
+visualize_correlation_heatmap(cor_matrix, 30)
+```
+
+
+## Group-specific correlation analysis (correlation)
+```{r echo=FALSE}
+
+# Function to calculating group-specific correlation matrices
+group_correlation <- function(data, group) {
+  # Filter data for specific group
+  group_data <- data %>%
+    filter(Group == group) %>%
+    select(-Group, -Sample)
+  
+  # calculating correlation
+  cor_matrix <- cor(group_data, method = "pearson", use = "pairwise.complete.obs")
+  
+  return(cor_matrix)
+}
+
+# calculating group-specific correlations
+sham_cor <- group_correlation(Fecal1, "Sham")
+tac_cor <- group_correlation(Fecal1, "TAC")
+tacV_cor <- group_correlation(Fecal1, "TAC_V")
+FMT_S_cor <- group_correlation(Fecal1, "TAC_FMT_S")
+FMT_V_cor <- group_correlation(Fecal1, "TAC_FMT_V")
+
+
+# Function to find differential correlations between groups
+differential_correlation <- function(cor1, cor2, groups, threshold = 0.5) {
+  # calculating difference
+  diff_cor <- cor1 - cor2
+  
+  # Convert to long format
+  diff_data <- as.data.frame(diff_cor) %>%
+    rownames_to_column("Metabolite1") %>%
+    pivot_longer(-Metabolite1, names_to = "Metabolite2", values_to = "Difference") %>%
+    filter(Metabolite1 != Metabolite2) %>%  # Remove self-differences
+    mutate(
+      Correlation1 = NA_real_,
+      Correlation2 = NA_real_
+    )
+  
+  # Add original correlations
+  for (i in 1:nrow(diff_data)) {
+    met1 <- diff_data$Metabolite1[i]
+    met2 <- diff_data$Metabolite2[i]
+    diff_data$Correlation1[i] <- cor1[met1, met2]
+    diff_data$Correlation2[i] <- cor2[met1, met2]
+  }
+  
+  # Filter by threshold
+  diff_data <- diff_data %>%
+    filter(abs(Difference) >= threshold) %>%
+    arrange(desc(abs(Difference))) %>%
+    mutate(
+      Met_pair = pmap_chr(list(Metabolite1, Metabolite2), 
+                          ~paste(sort(c(..1, ..2)), collapse="-"))
+    ) %>%
+    distinct(Met_pair, .keep_all = TRUE) %>%
+    select(-Met_pair)
+  
+  # Add group names
+  colnames(diff_data)[3:5] <- c("Difference", paste0("Cor_", groups[1]), paste0("Cor_", groups[2]))
+  
+  return(diff_data)
+}
+
+# Find differential correlations between Sham and TAC
+diff_samVStac <- differential_correlation(sham_cor, tac_cor, c("Sham", "TAC"), 0.7)
+print("Top differential correlations between Sham and TAC:")
+print(head(diff_samVStac, 20))
+
+diff_samVStac_V <- differential_correlation(sham_cor, tacV_cor, c("Sham", "TAC_V"), 0.7)
+print("Top differential correlations between Sham and TAC-V:")
+print(head(diff_samVStac_V, 20))
+
+diff_samVSfmt_S <- differential_correlation(sham_cor, FMT_S_cor, c("Sham", "TAC_FMT_S"), 0.7)
+print("Top differential correlations between Sham and FMT-S:")
+print(head(diff_samVSfmt_S, 20))
+
+diff_samVSfmt_V <- differential_correlation(sham_cor, FMT_V_cor, c("Sham", "TAC_FMT_V"), 0.7)
+print("Top differential correlations between Sham and FMT-V:")
+print(head(diff_samVSfmt_V, 20))
+
+
+# Visualize differential correlations
+plot_differential_correlation <- function(diff_data, groups) {
+  # Get top 20 differential correlations
+  top_diff <- head(diff_data, 20)
+  
+  # creating x-axis labels
+  top_diff <- top_diff %>%
+    mutate(Pair = paste(Metabolite1, "-", Metabolite2))
+  
+  # Convert to long format for plotting
+  plot_data <- top_diff %>%
+    select(Pair, starts_with("Cor_")) %>%
+    pivot_longer(cols = starts_with("Cor_"), 
+                names_to = "Group", 
+                values_to = "Correlation") %>%
+    mutate(Group = gsub("Cor_", "", Group))
+  
+  # Plot
+  ggplot(plot_data, aes(x = reorder(Pair, Correlation), y = Correlation, fill = Group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    coord_flip() +
+    scale_fill_brewer(palette = "Set1") +
+    labs(
+      title = paste("Top Differential Correlations between", groups[1], "and", groups[2]),
+      x = "Metabolite Pair",
+      y = "Correlation Coefficient"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8),
+      legend.title = element_blank()
+    )
+}
+
+# Plot differential correlations
+plot_differential_correlation(diff_samVStac, c("Sham", "TAC"))
+plot_differential_correlation(diff_samVStac_V, c("Sham", "TAC_V"))
+plot_differential_correlation(diff_samVSfmt_S, c("Sham", "FMT_S"))
+plot_differential_correlation(diff_samVSfmt_V, c("Sham", "FMT_V"))
+```
+
+## Association Analysis(one-way ANOVA)
+
+```{r echo=FALSE}
+# one-way ANOVA for each metabolite
+metabolite_anova <- function(data) {
+  # Get metabolite names
+  metabolites <- colnames(data %>% select(-Sample, -Group))
+  
+  # creating results dataframe
+  results <- data.frame(
+    Metabolite = character(),
+    F_value = numeric(),
+    p_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Performing ANOVA for each metabolite
+  for (metabolite in metabolites) {
+    
+    # creating formula
+    formula <- as.formula(paste(metabolite, "~ Group"))
+    
+    # ANOVA model
+    model <- try(aov(formula, data = data), silent = TRUE)
+    
+    # Extracting results if model fitted successfully
+    if (!inherits(model, "try-error")) {
+      model_summary <- summary(model)[[1]]
+      f_value <- model_summary$"F value"[1]
+      p_value <- model_summary$"Pr(>F)"[1]
+      
+      # Add to results
+      results <- rbind(results, data.frame(
+        Metabolite = metabolite,
+        F_value = f_value,
+        p_value = p_value,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Add adjusted p-values
+  results <- results %>%
+    mutate(
+      adj_p_value = p.adjust(p_value, method = "BH")
+    ) %>%
+    arrange(adj_p_value)
+  
+  return(results)
+}
+
+# Perform ANOVA for each metabolite
+anova_results <- metabolite_anova(Fecal1)
+print("Top metabolites associated with experimental groups:")
+print(head(anova_results, 20))
+
+# Visualize top differential metabolites
+plot_group_differences <- function(data, top_metabolites, n = 5) {
+  # Select top n metabolites
+  top_n_metabolites <- head(top_metabolites$Metabolite, n)
+  
+  # Prepare data for plotting
+  plot_data <- data %>%
+    select(Sample, Group, all_of(top_n_metabolites)) %>%
+    pivot_longer(cols = all_of(top_n_metabolites), 
+                names_to = "Metabolite", 
+                values_to = "Value")
+  
+  # Plot boxplots
+  ggplot(plot_data, aes(x = Group, y = Value, fill = Group)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    facet_wrap(~ Metabolite, scales = "free_y") +
+    scale_fill_brewer(palette = "Set1") +
+    labs(
+      title = "Group Differences in Top Associated Metabolites",
+      x = "Experimental Group",
+      y = "Metabolite Level"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    )
+}
+
+# Plot group differences for top metabolites
+plot_group_differences(Fecal1, anova_results, 20)
+```
+
+
+## Group-specific mean analysis
+
+```{r echo=FALSE}
+# calculating group means for each metabolite
+group_means <- Fecal1 %>%
+  pivot_longer(cols = -c(Sample, Group), 
+               names_to = "Metabolite", 
+               values_to = "Value") %>%
+  group_by(Group, Metabolite) %>%
+  summarize(Mean = mean(Value, na.rm = TRUE),
+            SE = sd(Value, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+# metabolites with most different means between groups
+find_different_means <- function(group_means, reference_group = "Sham") {
+  # reference means
+  ref_means <- group_means %>%
+    filter(Group == reference_group) %>%
+    select(Metabolite, Mean) %>%
+    rename(RefMean = Mean)
+  
+  # calculating fold changes
+  fold_changes <- group_means %>%
+    left_join(ref_means, by = "Metabolite") %>%
+    filter(Group != reference_group) %>%
+    mutate(
+      FoldChange = Mean / RefMean,
+      LogFC = log2(FoldChange)
+    ) %>%
+    arrange(desc(abs(LogFC)))
+  
+  return(fold_changes)
+}
+
+# Find metabolites with different means vs Sham
+diff_means <- find_different_means(group_means, "Sham")
+print("Top metabolites with different means vs Sham:")
+print(head(diff_means, 20))
+
+# Visualize top different metabolites
+plot_mean_differences <- function(data, diff_means, n = 20) {
+  # Get top n metabolites
+  top_mets <- head(diff_means %>% arrange(desc(abs(LogFC))), n) %>%
+    pull(Metabolite) %>%
+    unique()
+  
+  # Filter data for these metabolites
+  plot_data <- Fecal1 %>%
+    pivot_longer(cols = -c(Sample, Group), 
+                 names_to = "Metabolite", 
+                 values_to = "Value") %>%
+    filter(Metabolite %in% top_mets)
+  
+  # Plot
+  ggplot(plot_data, aes(x = Group, y = Value, fill = Group)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    facet_wrap(~ Metabolite, scales = "free_y") +
+    scale_fill_brewer(palette = "Set1") +
+    labs(
+      title = "Group Differences in Metabolites",
+      x = "Experimental Group",
+      y = "Metabolite Level"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    )
+}
+
+# Plot top different metabolites
+plot_mean_differences(data, diff_means, 20)
+```
+
+```{r include=FALSE}
+
+# 7. Covariation analysis - identifying metabolites that change together
+
+# Identify co-varying metabolites across groups
+identify_covarying_metabolites <- function(data, threshold = 0.7) {
+  # calculating fold changes vs Sham for all groups
+  sham_means <- data %>%
+    filter(Group == "Sham") %>%
+    select(-Sample, -Group) %>%
+    summarise(across(everything(), mean, na.rm = TRUE))
+  
+  # calculating fold changes for all samples vs sham mean
+  fold_changes <- data %>%
+    select(-Sample) %>%
+    mutate(across(-Group, ~ ./as.numeric(sham_means[cur_column()])))
+  
+  # calculating correlation between fold changes
+  fc_cor <- fold_changes %>%
+    select(-Group) %>%
+    cor(method = "pearson", use = "pairwise.complete.obs")
+  
+  # Find metabolites that covary together
+  covarying_pairs <- as.data.frame(fc_cor) %>%
+    rownames_to_column("Metabolite1") %>%
+    pivot_longer(-Metabolite1, names_to = "Metabolite2", values_to = "Correlation") %>%
+    filter(Metabolite1 != Metabolite2) %>%
+    filter(abs(Correlation) >= threshold) %>%
+    arrange(desc(abs(Correlation))) %>%
+    mutate(
+      Met_pair = pmap_chr(list(Metabolite1, Metabolite2), 
+                          ~paste(sort(c(..1, ..2)), collapse="-"))
+    ) %>%
+    distinct(Met_pair, .keep_all = TRUE) %>%
+    select(-Met_pair)
+  
+  return(list(covarying_pairs = covarying_pairs, fc_cor = fc_cor))
+}
+
+# Find co-varying metabolites
+covariation_results <- identify_covarying_metabolites(Fecal1, 0.8)
+print("Top co-varying metabolite pairs:")
+print(head(covariation_results$covarying_pairs, 20))
+
+# Visualize co-varying metabolites
+plot_covarying_metabolites <- function(Fecal1, covarying_pairs, n = 5) {
+  # Get top n pairs
+  top_pairs <- head(covarying_pairs, n)
+  
+  # Prepare data for plotting
+  pairs_data <- data.frame()
+  
+  for (i in 1:nrow(top_pairs)) {
+    met1 <- top_pairs$Metabolite1[i]
+    met2 <- top_pairs$Metabolite2[i]
+    corr <- top_pairs$Correlation[i]
+    
+    pair_data <- Fecal1 %>%
+      select(Sample, Group, all_of(c(met1, met2))) %>%
+      rename(Value1 = all_of(met1), Value2 = all_of(met2)) %>%
+      mutate(Pair = paste0(met1, " - ", met2, " (r = ", round(corr, 2), ")"))
+    
+    pairs_data <- rbind(pairs_data, pair_data)
+  }
+  
+  # Plot
+  ggplot(pairs_data, aes(x = Value1, y = Value2, color = Group)) +
+    geom_point(size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+    facet_wrap(~ Pair, scales = "free") +
+    scale_color_brewer(palette = "Set1") +
+    labs(
+      title = "Co-varying Metabolite Pairs",
+      x = "Metabolite 1 Value",
+      y = "Metabolite 2 Value"
+    ) +
+    theme_minimal()
+}
+
+# Plot co-varying metabolites
+plot_covarying_metabolites(Fecal1, covariation_results$covarying_pairs, 4)
+```
+
+```{r include=FALSE}
+# # Save results
+# write.csv(strong_cors, "strong_correlations.csv", row.names = FALSE)
+# write.csv(diff_cors, "differential_correlations_Sham_vs_TAC.csv", row.names = FALSE)
+# write.csv(anova_results, "metabolite_association_with_groups.csv", row.names = FALSE)
+# write.csv(cluster_analysis, "metabolite_clusters.csv", row.names = FALSE)
+# write.csv(diff_means, "fold_changes_vs_Sham.csv", row.names = FALSE)
+# write.csv(covariation_results$covarying_pairs, "covarying_metabolites.csv", row.names = FALSE)
+# 
+# # Save plots
+# ggsave("correlation_heatmap.png", width = 10, height = 8)
+# ggsave("differential_correlations.png", plot_differential_correlation(diff_cors, c("Sham", "TAC")), width = 10, height = 8)
+# ggsave("group_differences.png", plot_group_differences(data, anova_results, 6), width = 12, height = 8)
+# ggsave("correlation_network.png", all_network, width = 12, height = 10)
+# ggsave("mean_differences.png", plot_mean_differences(data, diff_means, 9), width = 12, height = 8)
+# ggsave("covarying_metabolites.png", plot_covarying_metabolites(data, covariation_results$covarying_pairs, 4), width = 12, height = 10)
+```
+
+
+
+
+```{r include=FALSE}
+mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+                        sheet = 6, 
+                        range = "A2:N31",
+                        col_names = TRUE)
+colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
+  
+integrated_data <- Fecal1 %>%
+  left_join(mice_info, by = "Sample") %>% 
+  select(-S.No, -Gender, -Purpose) %>% 
+  rename(
+    LV_Thickness = `LV Thickness (mm)`,
+    HW_mg = `HW (mg)`,
+    LVW_mg = `LVW (mg)`,
+    Peak_LS = `Peak LS`,
+    GLS = `GLS (%)`
+  )
+
+colnames(mice_info)
+
+
+
+correlate_with_physio <- function(metabolite_data, physio_params) {
+  results <- data.frame(
+    Metabolite = character(),
+    Parameter = character(),
+    Correlation = numeric(),
+    P_value = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  metabolites <- colnames(metabolite_data)[!colnames(metabolite_data) %in% 
+                                             c("Sample", "Group", physio_params)]
+  
+  for (metabolite in metabolites) {
+    for (param in physio_params) {
+      # Get values
+      met_values <- metabolite_data[[metabolite]]
+      param_values <- metabolite_data[[param]]
+      
+      # Remove missing values
+      complete <- !is.na(met_values) & !is.na(param_values)
+      
+      if (sum(complete) > 3) {  # Need at least 4 pairs for correlation
+        # calculating correlation
+        cor_test <- cor.test(met_values[complete], param_values[complete],
+                             method = "pearson")
+        
+        # Store results
+        results <- rbind(results, data.frame(
+          Metabolite = metabolite,
+          Parameter = param,
+          Correlation = cor_test$estimate,
+          P_value = cor_test$p.value,
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+  }
+  
+  # Add adjusted p-values
+  results <- results %>%
+    group_by(Parameter) %>%
+    mutate(Adj_P_value = p.adjust(P_value, method = "BH")) %>%
+    ungroup() %>%
+    arrange(Parameter, Adj_P_value)
+  
+  return(results)
+}
+
+# Specify physiological parameters to correlate with
+physio_params <- c("HW_mg", "LVW_mg", "LV_Thickness")
+
+
+
+# calculating correlations
+physio_correlations <- correlate_with_physio(integrated_data, physio_params)
+
+significant_cor <- physio_correlations %>% filter(Adj_P_value < 0.05 & Correlation > 0.5)
+
+significant_cor
+
+# Print top correlations for each parameter
+for (param in physio_params) {
+  cat("\nTop correlations with", param, ":\n")
+  print(head(physio_correlations %>% 
+               filter(Parameter == param) %>% 
+               arrange(Adj_P_value), 10))
+}
+
+# 4. Visualize top correlations
+plot_physio_correlations <- function(data, correlations, param, n = 6) {
+  # Get top n metabolites
+  top_mets <- correlations %>%
+    filter(Parameter == param) %>%
+    arrange(Adj_P_value) %>%
+    head(n) %>%
+    pull(Metabolite)
+  
+  # Prepare data for plotting
+  plot_data <- data %>%
+    select(Sample, Group, all_of(c(top_mets, param))) %>%
+    pivot_longer(cols = all_of(top_mets),
+                 names_to = "Metabolite",
+                 values_to = "Metabolite_Value")
+  
+  # creating scatterplots
+  ggplot(plot_data, aes(x = Metabolite_Value, y = .data[[param]], color = Group)) +
+    geom_point(size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    facet_wrap(~ Metabolite, scales = "free_x") +
+    scale_color_brewer(palette = "Set1") +
+    labs(
+      title = paste("Correlation between Metabolites and", param),
+      x = "Metabolite Level",
+      y = param
+    ) +
+    theme_minimal() +
+    theme(
+    panel.background = element_rect(fill = "white"), 
+    plot.background = element_rect(fill = "white"),  
+    panel.grid.major = element_line(color = "gray", size = 0.5), 
+    panel.grid.minor = element_line(color = "gray", size = 0.25)  
+  )
+}
+
+# Plot correlations for each physiological parameter
+for (param in physio_params) {
+  plot <- plot_physio_correlations(integrated_data, physio_correlations, param)
+  print(plot)
+  ggsave(paste0("correlation_", param, ".png"), plot, width = 12, height = 8)
+}
+
+# # 5. Multiple regression analysis
+# # Function to build regression models
+# build_regression_models <- function(data, metabolites, param, include_group = TRUE) {
+#   models <- list()
+#   summaries <- data.frame(
+#     Metabolite = character(),
+#     R_squared = numeric(),
+#     Adj_R_squared = numeric(),
+#     P_value = numeric(),
+#     Group_significant = logical(),
+#     Interaction_significant = logical(),
+#     stringsAsFactors = FALSE
+#   )
+#   
+#   for (metabolite in metabolites) {
+#     # Basic model with metabolite only
+#     formula1 <- as.formula(paste(param, "~", metabolite))
+#     model1 <- lm(formula1, data = data)
+#     
+#     # Model with group
+#     formula2 <- as.formula(paste(param, "~", metabolite, "+ Group"))
+#     model2 <- lm(formula2, data = data)
+#     
+#     # Model with interaction
+#     formula3 <- as.formula(paste(param, "~", metabolite, "* Group"))
+#     model3 <- lm(formula3, data = data)
+#     
+#     # Select best model based on adjusted R²
+#     models[[metabolite]] <- list(
+#       model1 = model1,
+#       model2 = model2,
+#       model3 = model3
+#     )
+#     
+#     # ANOVA to test if Group improves model
+#     anova12 <- anova(model1, model2)
+#     anova23 <- anova(model2, model3)
+#     
+#     # Store summary
+#     summaries <- rbind(summaries, data.frame(
+#       Metabolite = metabolite,
+#       R_squared = summary(model2)$r.squared,
+#       Adj_R_squared = summary(model2)$adj.r.squared,
+#       P_value = summary(model2)$coefficients[2, 4], 
+#       Group_significant = anova12$`Pr(>F)`[2] < 0.05,
+#       Interaction_significant = anova23$`Pr(>F)`[2] < 0.05,
+#       stringsAsFactors = FALSE
+#     ))
+#   }
+#   
+#   return(list(models = models, summaries = summaries %>% arrange(desc(Adj_R_squared))))
+# }
+# 
+# 
+# # For each physiological parameter, build models for top correlated metabolites
+# for (param in physio_params) {
+#   # Get top 10 metabolites for this parameter
+#   top_mets <- physio_correlations %>%
+#     filter(Parameter == param, Adj_P_value < 0.05) %>%
+#     arrange(Adj_P_value) %>%
+#     head(10) %>%
+#     pull(Metabolite)
+#   
+#   if (length(top_mets) > 0) {
+#     # Build regression models
+#     regression_results <- build_regression_models(integrated_data, top_mets, param)
+#     
+#     # Print summaries
+#     cat("\nRegression models for", param, ":\n")
+#     print(regression_results$summaries)
+#     
+#     # Save results
+#     write.csv(regression_results$summaries, 
+#               paste0("regression_models_", param, ".csv"), 
+#               row.names = FALSE)
+#   } else {
+#     cat("\nNo significant correlations found for", param, "\n")
+#   }
+# }
+# 
+# # 6. Metabolite clusters associated with physiological parameters
+# # Function to identify metabolite clusters related to physiological parameters
+# identify_physio_related_clusters <- function(clusters, correlations, threshold = 0.05) {
+#   # creating cluster dataframe
+#   cluster_df <- data.frame(
+#     Metabolite = names(clusters),
+#     Cluster = clusters,
+#     stringsAsFactors = FALSE
+#   )
+#   
+#   # Merge with correlations
+#   merged <- correlations %>%
+#     filter(Adj_P_value < threshold) %>%
+#     left_join(cluster_df, by = "Metabolite")
+#   
+#   # Summarize by cluster and parameter
+#   cluster_summary <- merged %>%
+#     group_by(Parameter, Cluster) %>%
+#     summarize(
+#       Count = n(),
+#       Mean_correlation = mean(Correlation),
+#       Metabolites = paste(Metabolite, collapse = ", "),
+#       .groups = "drop"
+#     ) %>%
+#     arrange(Parameter, desc(Count))
+#   
+#   return(cluster_summary)
+# }
+# 
+# # Identify which metabolite clusters are associated with physiological parameters
+# physio_clusters <- identify_physio_related_clusters(
+#   metabolite_clusters$clusters, 
+#   physio_correlations
+# )
+# 
+# # Print results
+# print("Metabolite clusters associated with physiological parameters:")
+# print(physio_clusters)
+# 
+# # Save results
+# write.csv(physio_correlations, "metabolite_physio_correlations.csv", row.names = FALSE)
+# write.csv(physio_clusters, "physio_related_clusters.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## New Analysis to understan overall effet of the metabolite on heart mass
+```{r}
+Fecal1 <- read_excel("E:/Ajit data analysis/Tac/Fecal metablomics 2022 set 1.xlsx")
+
+metabolites <- colnames(Fecal1)[-1]
+
+
+clean_names <- gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+clean_names <- gsub("^[0-9]+_|_[0-9]+_|_[0-9]+$|[0-9]+_", "", clean_names)
+
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[() ]", "_", metabolites)))
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+colnames(Fecal1)[-1] <- clean_names
+
+Fecal1 <- Fecal1 %>%
+  mutate(
+    Group = case_when(
+      grepl("WT-Sham", Sample) ~ "Sham",
+      grepl("WT-TAC-FMT-V", Sample) ~ "TAC_FMT_V",
+      grepl("WT-TAC-FMT-S", Sample) ~ "TAC_FMT_S",
+      grepl("WT-TAC-V", Sample) ~ "TAC_V",
+      grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
+      TRUE ~ "Other"
+    ), .after = "Sample"
+  ) %>% 
+  mutate(Group = as.factor(Group))
+```
+
+## Mice info
+```{r}
+mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+                        sheet = 6, 
+                        range = "A2:N31",
+                        col_names = TRUE)
+colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
+  
+integrated_data <- Fecal1 %>%
+  left_join(mice_info, by = "Sample") %>% 
+  select(-S.No, -Gender, -Purpose, -`Peak LS`, -`EF (%)`) %>% 
+  rename(
+    LV_Thickness = `LV Thickness (mm)`,
+    LVW_mg = `LVW (mg)`,
+    LVW_TL = `LVW/TL (mg/mm)`,
+    HW_TL = `HW/TL (mg/mm)`,
+    FS = `FS%`,
+    HW_mg = `HW (mg)`,
+    GLS = `GLS (%)`
+  ) %>% 
+  relocate(HW_mg, .after = Sample)
+
+```
+
+## Pair-wise test (relation between Heart wt. and metabolite)
+```{r}
+# c("Sample", "Group", "LV_Thickness", "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg")
+library(GGally)
+ggpairs(integrated_data[, c("HW_mg", 
+                            setdiff(colnames(integrated_data), 
+                                    c("Sample", "Group", 
+                                      "LVW_mg", 
+                                      "FS", "GLS", "HW_mg")))])
+
+# Calculating the correlation matrix
+cor_matrix <- cor(integrated_data[, c("HW_mg", 
+                            setdiff(colnames(integrated_data), 
+                                    c("Sample", "Group", 
+                                      "LVW_mg", 
+                                      "FS", "GLS", "HW_mg")))],
+                  use = "complete.obs")
+print(cor_matrix) 
+```
+
+
+```{r}
+# write.csv(cor_matrix, "E:/Ajit data analysis/Tac/cor_matrix2.csv")
+```
+
+
+```{r}
+corr_data <- integrated_data %>% select(-c(LV_Thickness, LVW_mg, LVW_TL, HW_TL,FS, EF, GLS))
+corr_data <- corr_data %>% column_to_rownames("Sample")
+cor_matrix <- cor(corr_data, method = "pearson", use = "pairwise.complete.obs")
+cor_with_heart <- cor_matrix["HW_mg", , drop = FALSE] 
+
+
+visualize_correlation_heatmap <- function(cor_matrix, n_top = 30) {
+  metabolite_vars <- apply(corr_data, 2, var, na.rm = TRUE)
+  top_metabolites <- names(sort(metabolite_vars, decreasing = TRUE))[1:n_top]
+  
+  top_metabolites_plus_hw <- c("HW_mg", top_metabolites)[1:n_top]
+
+  cor_subset <- cor_matrix[top_metabolites_plus_hw, top_metabolites_plus_hw]
+  pheatmap(cor_subset,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           display_numbers = FALSE,
+           fontsize_row = 8,
+           fontsize_col = 8,
+           main = "Correlation Heatmap of Top Variable Metabolites")
+  par(mar = c(5, 4, 7, 2)) 
+  corrplot(cor_subset, method = "circle", type = "upper", 
+           order = "hclust", tl.col = "black", tl.cex = 0.7,
+           title = "Correlation Plot of Top Variable Metabolites")
+
+  return(top_metabolites)
+}
+
+top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 30)
+visualize_correlation_heatmap(cor_matrix, 30)
+
+  
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# assume corr_data still has Sample & HW_mg plus only numeric metabolites
+cor_with_HW <- corr_data %>% 
+  summarise(across(-c(Sample, HW_mg), 
+                   ~ cor(.x, HW_mg, use = "pairwise.complete.obs")))
+
+cor_df <- tibble(
+  Metabolite = names(cor_with_HW),
+  correlation = as.numeric(cor_with_HW[1, ])
+) %>%
+  arrange(desc(abs(correlation))) 
+
+N <- 20   # top 10; change as desired
+top_metabs <- cor_df$Metabolite[1:N]
+
+# 2) Build matrix of top metabolites (rows = samples)
+heat_data <- corr_data %>% 
+  select(Sample, all_of(top_metabs)) %>% 
+  column_to_rownames("Sample")
+
+# 3) Prepare annotation for heart weight
+annotation_df <- corr_data %>% 
+  select(Sample, HW_mg) %>% 
+  column_to_rownames("Sample")
+
+# 4) Plot with pheatmap
+# install.packages("pheatmap") if you don’t have it
+library(pheatmap)
+
+pheatmap(
+  mat        = heat_data,
+  annotation_row = annotation_df,
+  scale      = "row",              # z‐score each metabolite
+  clustering_distance_rows    = "euclidean",
+  clustering_distance_cols    = "euclidean",
+  clustering_method          = "complete",
+  main       = paste("Top", N, "Metabolites by |r| with HW_mg")
+)
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidyheatmaps)
+corr_data <- integrated_data %>% select(-c(LV_Thickness, LVW_mg, LVW_TL, HW_TL,FS, EF, GLS))
+#corr_data <- corr_data %>% column_to_rownames("Sample")
+cor_df <- corr_data %>% 
+  summarise(across(-c(Sample, HW_mg), 
+                   ~ cor(.x, HW_mg, use = "pairwise.complete.obs"))) %>% 
+  pivot_longer(everything(),
+               names_to  = "Metabolite",
+               values_to = "corr") %>% 
+  arrange(desc(abs(corr)))
+
+N <- 20
+top_metabs <- cor_df$Metabolite[1:N]
+
+# 2) Pivot your data into long form, keeping HW_mg as a column
+tidy_df <- corr_data %>% 
+  select(Sample, HW_mg, all_of(top_metabs)) %>% 
+  pivot_longer(
+    cols      = -c(Sample, HW_mg),
+    names_to  = "Metabolite",
+    values_to = "Abundance"
+  )
+
+# 3) Draw the heatmap, annotating rows by HW_mg
+tidy_df %>%
+  tidyheatmap(
+    rows           = Sample,
+    columns        = Metabolite,
+    values         = Abundance,
+    annotation_row = HW_mg,     # <— use the HW_mg column already in tidy_df
+    scale          = "row",
+    cluster_rows   = TRUE,
+    cluster_cols   = TRUE,
+    main           = paste("Top", N, "Metabolites by |cor| with HW_mg")
+  )
+
+
+
+cor_df <- corr_data %>% 
+  summarise(across(-c(Sample, HW_mg), 
+                   ~ cor(.x, HW_mg, use = "pairwise.complete.obs"))) %>% 
+  pivot_longer(everything(),
+               names_to  = "Metabolite",
+               values_to = "corr") %>% 
+  arrange(desc(abs(corr)))
+
+N <- 25
+top_metabs <- cor_df$Metabolite[1:N]
+
+# 2) Build the long data frame, now including Group
+tidy_df <- corr_data %>% 
+  select(Sample, Group, HW_mg, all_of(top_metabs)) %>% 
+  pivot_longer(
+    cols      = -c(Sample, Group, HW_mg),
+    names_to  = "Metabolite",
+    values_to = "Abundance"
+  )
+
+# 3) Plot, annotating rows by both Group and HW_mg
+tidy_df %>%
+  tidyheatmap(
+    rows             = Sample,
+    columns          = Metabolite,
+    values           = Abundance,
+    annotation_row   = c(Group, HW_mg),
+    scale            = "row",
+    cluster_rows     = TRUE,
+    cluster_cols     = TRUE,
+    main             = paste("Top", N, "Metabolites by |cor| with HW_mg")
+  )
+```
+###### test ######
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidyHeatmap)
+
+# 1. Compute correlation matrix
+# Exclude non-numeric columns like Sample and Group
+numeric_data <- corr_data %>%
+  select(-Sample, -Group)
+
+cor_matrix <- cor(numeric_data, method = "pearson", use = "pairwise.complete.obs")
+
+# 2. Extract correlations with HW_mg
+cor_with_hw <- cor_matrix["HW_mg", ]
+cor_df <- tibble(Metabolite = names(cor_with_hw), corr = cor_with_hw) %>%
+  filter(Metabolite != "HW_mg") %>%
+  arrange(desc(abs(corr)))
+
+# 3. Select top N correlated metabolites
+N <- 20
+top_metabs <- cor_df$Metabolite[1:N]
+
+# 4. Build long-form tidy data frame for tidyheatmap
+tidy_df <- corr_data %>%
+  select(Sample, Group, HW_mg, all_of(top_metabs)) %>%
+  pivot_longer(
+    cols = -c(Sample, Group, HW_mg),
+    names_to = "Metabolite",
+    values_to = "Abundance"
+  )
+
+# 5. Plot heatmap with annotations
+tidy_df %>%
+  tidyheatmap(
+    rows           = Sample,
+    columns        = Metabolite,
+    values         = Abundance,
+    annotation_row = c(Group, HW_mg),
+    scale          = "row",
+    cluster_rows   = TRUE,
+    cluster_cols   = TRUE,
+    main           = paste("Top", N, "Metabolites by |cor| with HW_mg")
+  )
+
+corrplot(cor_matrix, 
+         method = "color",       # or "circle", "number", "shade", etc.
+         type = "upper",         # only show upper triangle (can use "full")
+         order = "hclust",       # hierarchical clustering of variables
+         tl.col = "black",       # text label color
+         tl.cex = 0.8,           # text label size
+         col = colorRampPalette(c("blue", "white", "red"))(200),  # color scale
+         title = "Correlation Matrix",
+         mar = c(0,0,1,0))
+
+
+```
+
+
+
+```{r}
+library(dplyr)
+
+corr_numeric <- corr_data %>% 
+  select(-Sample, -Group)   # keep everything that’s numeric
+
+# 2) (Optional) If you only want HW_mg + your top N metabolites:
+N <- 20
+top_metabs <- cor_df$Metabolite[1:N]   # from earlier
+vars_for_matrix <- c("HW_mg", top_metabs)
+
+corr_subset <- corr_numeric %>% 
+  select(all_of(vars_for_matrix)) %>% 
+  cor(use = "pairwise.complete.obs")
+
+# 3) Print it to console
+print(corr_subset)
+
+# 4) (Optional) Pretty‐up with corrplot
+# install.packages("corrplot")
+library(corrplot)
+corrplot(corr_subset, method = "color", tl.cex = 0.8, number.cex = 0.7)
+```
+
+
+## Multiple Linear Regression Model
+```{r}
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+
+
+# formula_str_lm <- paste("HW_mg ~", paste(paste0("`", predictors, "`"), collapse = " + "))
+# Converting to formula
+
+formula_str_lm <- paste("HW_mg ~", paste(predictors, collapse = " + "))
+
+lm_formula <- as.formula(formula_str_lm)
+
+# Model
+lm_model <- lm(lm_formula, data = integrated_data)
+
+
+summary(lm_model)
+```
+
+
+```{r}
+step(lm(HW_mg ~ 1, data = integrated_data), 
+     scope = lm_formula,
+     direction = "forward")
+```
+
+```{r}
+summary(lm(HW_mg ~ Tryptophan + Guanosine + Lactate + Adenosine + Phosphoglycerate + 
+    Ribose + Fructosephosphate + Mandelic_acid + beta_Alanine + 
+    Aminoadipate + Malonate + Monopropionin + Oleic_acid + Indolepropionic_acid + 
+    Heptanoic_acid + Cytosine + Citrate + Adonitol + Indoleacrylic_acid + 
+    Cholesterol + N_acetylglutamate + Phosphogluconate + Arachidic_acid_Eicosanoic_acid + 
+    Aspartate + beta_Hydroxy_beta_Methylbutyric_acid_HMB + Serine + 
+    Stearate, data = integrated_data))
+
+summary(lm(HW_mg ~ Tryptophan + Guanosine + Lactate + Adenosine + Phosphoglycerate + 
+    Ribose + Fructosephosphate + Mandelic_acid + beta_Alanine + 
+    Aminoadipate + Malonate + Monopropionin + Oleic_acid + Indolepropionic_acid + 
+    Heptanoic_acid + Cytosine + Citrate + Adonitol + Indoleacrylic_acid + 
+    Cholesterol + N_acetylglutamate + Phosphogluconate + Arachidic_acid_Eicosanoic_acid + 
+    Aspartate + beta_Hydroxy_beta_Methylbutyric_acid_HMB + Serine + 
+    Stearate + Hydroxybutyrate, data = integrated_data))
+
+
+
+summary(gam(HW_mg ~ 
+    s(Tryptophan) + s(Guanosine) + s(Lactate) + s(Adenosine) + 
+    s(Phosphoglycerate) + s(Ribose) + s(Fructosephosphate) + 
+    s(Mandelic_acid) + s(beta_Alanine) + s(Aminoadipate) + s(Malonate) + 
+    s(Monopropionin) + s(Oleic_acid) + s(Indolepropionic_acid) + 
+    s(Heptanoic_acid) + s(Cytosine) + s(Citrate) + s(Adonitol) + 
+    s(Indoleacrylic_acid) + s(Cholesterol) + s(N_acetylglutamate) + 
+    s(Phosphogluconate) + s(Arachidic_acid_Eicosanoic_acid) + 
+    s(Aspartate) + s(beta_Hydroxy_beta_Methylbutyric_acid_HMB) + 
+    s(Serine) + s(Stearate), data = integrated_data))
+
+
+summary(gam(HW_mg ~ 
+    s(Tryptophan) + s(Guanosine) + s(Lactate) + s(Adenosine) + 
+    s(Phosphoglycerate) + s(Ribose) + s(Fructosephosphate) + 
+    s(Mandelic_acid) + s(beta_Alanine) + s(Aminoadipate) + s(Malonate) + 
+    s(Monopropionin) + s(Oleic_acid) + s(Indolepropionic_acid) + 
+    s(Heptanoic_acid) + s(Cytosine) + s(Citrate) + s(Adonitol) + 
+    s(Indoleacrylic_acid) + s(Cholesterol) + s(N_acetylglutamate) + 
+    s(Phosphogluconate) + s(Arachidic_acid_Eicosanoic_acid) + 
+    s(Aspartate) + s(beta_Hydroxy_beta_Methylbutyric_acid_HMB) + 
+    s(Serine) + s(Stearate) + s(Hydroxybutyrate), data = integrated_data))
+
+
+```
+
+
+## Generalisied Regression Analysis 
+```{r}
+library(glmnet)
+
+# Prepare data (convert to matrix)
+x <- as.matrix(integrated_data[, predictors])
+y <- integrated_data$HW_mg
+
+# Fit LASSO
+# fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian")
+
+# Fit LASSO
+fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian", nfolds = 5)
+
+summary(fit_lasso)
+
+# Coefficients
+coef(fit_lasso, s = "lambda.min")
+
+
+coef((cv.glmnet(x, y, alpha = 1, family = "gaussian")), s = "lambda.min")
+
+coef((cv.glmnet(x, y, alpha = 0, family = "gaussian")), s = "lambda.min")
+
+coef((cv.glmnet(x, y, alpha = 0.25, family = "gaussian")), s = "lambda.min")
+
+
+
+
+y_pred <- predict(fit_lasso, newx = x, s = "lambda.min")
+
+residuals <- y - y_pred
+rss <- sum(residuals^2)
+print(rss)
+
+mse <- mean(residuals^2)
+print(mse)
+
+rmse <- sqrt(mse)
+print(rmse)
+
+# Total Sum of Squares
+tss <- sum((y - mean(y))^2)  
+r_squared <- 1 - (rss / tss)
+print(r_squared)
+```
+
+
+```{r}
+preds <- predict(fit_lasso, newx = x, s = "lambda.min")
+
+# Compute R²
+SSE <- sum((y - preds)^2)
+SST <- sum((y - mean(y))^2)
+R2 <- 1 - SSE/SST
+R2
+
+library(pls)
+fit_plsr <- plsr(HW_mg ~ ., data = integrated_data[, c("HW_mg", predictors)], validation = "LOO")
+summary(fit_plsr)
+```
+
+```{r}
+# ridge model:
+fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian", nfolds = 5)
+predicted_mass <- predict(fit_lasso, newx = x, s = "lambda.min")
+
+# # creating the combined effect data frame
+# combined_effect <- data.frame(
+#   Actual_HW_mg = as.numeric(y),
+#   Predicted_HW_mg = as.numeric(predicted_mass)
+# )
+# 
+# # calculating the difference and direction
+# combined_effect$Difference <- combined_effect$Predicted_HW_mg - combined_effect$Actual_HW_mg
+# combined_effect$Direction <- ifelse(combined_effect$Difference > 0, "↑", "↓")
+# 
+# # Add a sample index for plotting
+# combined_effect$Sample <- Fecal1$Sample
+# combined_effect$group <- Fecal1$Group
+# 
+# # Now plot
+# library(ggplot2)
+# 
+# ggplot(combined_effect, aes(x = Sample, y = Difference, fill = Direction)) +
+#   geom_col() +
+#   geom_hline(yintercept = 0, linetype = "dashed") +
+#   labs(y = "Combined Effect on Heart Mass", x = "Sample") +
+#   scale_fill_manual(values = c("↑" = "forestgreen", "↓" = "firebrick")) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#   theme_minimal()
+```
+
+
+```{r}
+# Extracting coefficients from  ridge model
+coefs <- as.matrix(coef(fit_lasso, s = "lambda.min"))
+coefs_df <- data.frame(Metabolites = rownames(coefs), Coef = as.numeric(coefs))
+coefs_df <- coefs_df[coefs_df$Metabolites != "(Intercept)", ]  # exclude intercept
+
+# Multiplying metabolite matrix (x) by coefficients to get the combined effect
+combined_effect_values <- as.vector(x %*% coefs_df$Coef)
+
+# Creating data frame with real HW_mg and combined effect
+combined_effect <- data.frame(
+  Sample = seq_len(length(y)),
+  Actual_HW_mg = as.numeric(y),
+  CombinedEffect = combined_effect_values
+)
+
+combined_effect$Sample <- Fecal1$Sample
+combined_effect$group <- Fecal1$Group
+
+# Plot actual heart mass vs. combined metabolite effect
+
+
+ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg)) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(x = "Combined Metabolite Effect (linear combination)", 
+       y = "Actual Heart Mass (mg)",
+       title = "Combined Effect of Metabolites on Heart Mass") +
+  theme_minimal()
+
+
+
+p <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 8, max.overlaps = 100) +  # Sample labels
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd" ),
+    labels = c("Sham", "TAC", "TAC FMT S", "TAC FMT V", "TAC V")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 40, face = "italic", ),
+    axis.title.y = element_text(size = 40, face = "italic"),
+    axis.text.x = element_text(size = 30),
+    axis.text.y = element_text(size = 30),
+    legend.text = element_text(size = 30),
+    legend.title = element_text(size = 30, face = "italic"),
+    plot.caption = element_text(size = 20, face = "italic"),
+    plot.title = element_text(size = 60, face = "bold.italic")
+  )
+p
+
+ # ggsave("E:/Ajit data analysis/Tac/fecal 2022/Overall Effect of Metabolites on Heart Weight nfold 10.png",
+ #        p,
+ #        width = 9, height = 6.5,
+ #        dpi = 400)
+ # 
+p2 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 4, max.overlaps = 100) +  # Sample labels
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd" ),
+    labels = c("Sham", "TAC", "TAC FMT S", "TAC FMT V", "TAC V")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 20, face = "italic", ),
+    axis.title.y = element_text(size = 20, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 30, face = "bold.italic")
+  )
+p2
+ 
+ # ggsave("E:/Ajit data analysis/Tac/fecal 2022/Overall Effect of Metabolites on Heart Weight 2022 nfold 5.png",
+ #        p2,
+ #        width = 16, height = 10,
+ #        dpi = 400)
+
+
+
+
+
+
+
+
+# ( + theme(
+#     panel.background = element_blank(),      # Remove grey panel
+#     plot.background = element_blank(),       # Remove plot background
+#     panel.grid.major = element_blank(),      # Remove major gridlines
+#     panel.grid.minor = element_blank(),      # Remove minor gridlines
+#     axis.line = element_line(color = "black")  # Keep axis lines
+#   ))
+```
+
+```{r warning=FALSE, include=FALSE}
+library(ggplot2)
+library(ggrepel)
+library(showtext)
+showtext_auto()
+
+ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg)) +
+  geom_point(color = "#1f78b4", size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "#e31a1c", size = 1) +
+  geom_text_repel(
+    aes(label = Sample),
+    size = 3.2,
+    max.overlaps = Inf,
+    box.padding = 0.5,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    family = "Arial"
+  ) +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Actual Heart Mass (mg)",
+    title = "Combined Effect of Metabolites on Heart Mass",
+    caption = "Dashed line: linear fit; points labeled by sample"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 13, face = "bold"),
+    axis.text = element_text(size = 11),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(size = 0.3, color = "grey80"),
+    plot.caption = element_text(size = 9, hjust = 1, face = "italic")
+  )
+
+
+ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg)) +
+  geom_point(shape = 21, fill = "#1f78b4", color = "black", size = 3, stroke = 0.3) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "solid", color = "black", size = 0.7) +
+  geom_text_repel(
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf,
+    box.padding = 0.35,
+    point.padding = 0.2,
+    segment.color = "grey50"
+  ) +
+  labs(
+    x = expression("Combined Metabolite Effect (linear combination)"),
+    y = "Actual Heart Mass (mg)",
+    title = "Combined Effect of Metabolites on Heart Mass",
+    caption = "Linear regression line shown; sample labels annotated"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10, color = "black"),
+    axis.line = element_line(size = 0.5),
+    plot.caption = element_text(size = 9, hjust = 1, face = "italic"),
+    panel.grid = element_blank()
+  )
+
+
+model <- lm(Actual_HW_mg ~ CombinedEffect, data = combined_effect)
+
+# Set up a clean plot
+plot(combined_effect$CombinedEffect, combined_effect$Actual_HW_mg,
+     pch = 21, bg = "#1f78b4", col = "black",
+     cex = 1.3,
+     xlab = "Combined Metabolite Effect (linear combination)",
+     ylab = "Actual Heart Mass (mg)",
+     main = "Combined Effect of Metabolites on Heart Mass",
+     font.main = 2,
+     cex.lab = 1.1,
+     cex.axis = 0.9,
+     las = 1,
+     bty = "l")
+
+# Add regression line
+abline(model, lwd = 2, col = "black")
+
+# Add text labels (lightly nudged for clarity)
+text(combined_effect$CombinedEffect, combined_effect$Actual_HW_mg,
+     labels = combined_effect$Sample,
+     pos = 3, offset = 0.5, cex = 0.7)
+
+# Optional: add R² value
+r2 <- summary(model)$r.squared
+legend("topleft",
+       legend = bquote(R^2 == .(format(r2, digits = 3))),
+       bty = "n",
+       cex = 1)
+```
+
+
+
+
+## Generalized Additive Model (GAM) \n Nonlinear relationships between metabolites and the mouse heart weight.
+```{r}
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+
+
+library(mgcv)
+# Build formula with smooth terms
+
+gam_model <- gam(HW_mg ~ 
+    s(Tryptophan) + s(Guanosine) + s(Lactate) + s(Adenosine) + 
+    s(Phosphoglycerate) + s(Ribose) + s(Fructosephosphate) + 
+    s(Mandelic_acid) + s(beta_Alanine) + s(Aminoadipate) + s(Malonate) + 
+    s(Monopropionin) + s(Oleic_acid) + s(Indolepropionic_acid) + 
+    s(Heptanoic_acid) + s(Cytosine) + s(Citrate) + s(Adonitol) + 
+    s(Indoleacrylic_acid) + s(Cholesterol) + s(N_acetylglutamate) + 
+    s(Phosphogluconate) + s(Arachidic_acid_Eicosanoic_acid) + 
+    s(Aspartate) + s(beta_Hydroxy_beta_Methylbutyric_acid_HMB) + 
+    s(Serine), data = integrated_data)
+
+
+summary(gam_model)
+plot(gam_model, pages = 1, scheme = 1)
+
+
+par(mar = c(4, 4, 1, 1))  # bottom, left, top, right
+plot(gam_model, pages = 1, scheme = 1)
+
+# formula_str_gam <- paste("HW_mg ~", paste0("s(`", predictors, "`)", collapse = " + "))
+# 
+# # Convert string to formula
+# #paste("HW_mg ~", paste0("s(", paste0("`", predictors, "`"), ")", collapse = " + "))
+# 
+# formula_str_gam <- paste("HW_mg ~", paste0("s(`", predictors, "`)", collapse = " + "))
+# 
+# 
+# 
+# 
+# smooth_terms <- paste0("s(`", predictors, "`)")
+# rhs <- paste(smooth_terms, collapse = " + ")
+# 
+# formula_str_gam <- paste("HW_mg ~", rhs)
+# 
+# 
+# gam_formula <- as.formula(formula_str_gam, env = globalenv())
+# 
+# gam_model <- gam(gam_formula, data = integrated_data)
+
+
+```
+
+```{r}
+summary(gam_model)
+plot(gam_model, pages = 1, scheme = 1)
+```
+
+
+
+
+```{r}
+# visualize_sample_metabolite_correlation <- function(data, n_top = 29, save_path = NULL) {
+#   # data: data frame with only metabolite columns (rows = samples)
+# 
+#   # Step 1: Compute top variable metabolites
+#   metabolite_vars <- apply(data, 2, var, na.rm = TRUE)
+#   top_metabolites <- names(sort(metabolite_vars, decreasing = TRUE))[1:n_top]
+# 
+#   # Step 2: Subset to top metabolites
+#   data_top <- data[, top_metabolites]
+# 
+#   # Step 3: Center columns (z-score by metabolite)
+#   data_scaled <- scale(data_top)
+# 
+#   # Step 4: Compute correlation between each sample and each metabolite
+#   # For each sample (row), correlate its profile with each metabolite column
+#   cor_matrix <- matrix(NA, nrow = nrow(data_scaled), ncol = ncol(data_scaled))
+#   for (i in 1:nrow(data_scaled)) {
+#     for (j in 1:ncol(data_scaled)) {
+#       cor_matrix[i, j] <- cor(data_scaled[i, ], data_scaled[, j], use = "pairwise.complete.obs")
+#     }
+#   }
+# 
+#   rownames(cor_matrix) <- rownames(data)
+#   colnames(cor_matrix) <- colnames(data_scaled)
+# 
+#   # Step 5: Plot
+#   if (!is.null(save_path)) {
+#     pdf(save_path, width = 12, height = 10)
+#   }
+# 
+#   pheatmap::pheatmap(cor_matrix,
+#                      color = colorRampPalette(c("blue", "white", "red"))(100),
+#                      cluster_rows = FALSE,
+#                      cluster_cols = TRUE,
+#                      fontsize_row = 8,
+#                      fontsize_col = 8,
+#                      main = "Sample × Metabolite Correlation")
+# 
+#   if (!is.null(save_path)) {
+#     dev.off()
+#   }
+# 
+#   return(cor_matrix)
+# }
+# 
+# visualize_sample_metabolite_correlation(corr_data, n_top = 30)
+
+```
+
+
+
+
+
+
+
+
+
+
+
