@@ -8,9 +8,7 @@ format:
     embed-resources: true
 editor: source
 ---
-
 # <span style="color:blue;">DNA sequence Generation Prediction</span>
-
 
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 library(readxl)
@@ -24,8 +22,6 @@ library(tidyr)
 library(scales)
 library(pROC)
 ```
-
-
 ## Data Cleaning
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 data <- read.csv("E:/micobiome core center uiowa analysis/project 1/ECMP NextSeq Run Metrics_2.csv", check.names = FALSE) %>% 
@@ -466,17 +462,14 @@ nextseq %>%
   )
 ```
 
-
-
+## Prediction Model
+Prediction Model for the probability of sequence generation based on the library concentration of the previous model.
+$\text{log-odds} = \beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density}$ <br>
+$\text{Probability} = 1/(1 + e^{-\text{log-odds}})$ <br>
+$\text{Probability} = 1/(1 + e^{-(\beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density})})$ <br>
 
 ```{r message=FALSE, warning=FALSE, include=FALSE}
-## Prediction Model for the probability of sequence generation based on library concentration of previous model.
-# $\text{log-odds} = \beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density}$ <br>
-# $\text{Probability} = 1/(1 + e^{-\text{log-odds}})$ <br>
-# $\text{Probability} = 1/(1 + e^{-(\beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density})})$ <br>
-
 set.seed(9999)
-
 model <- glm(generated ~ library_conc_nm + cluster_density, data = nextseq, family = binomial)
 
 prediction_sequence_generation <- function(library_conc_nm, cluster_density, model) {
@@ -526,7 +519,7 @@ predicted_data$sequence <- ifelse(
   predicted_data$predicted_probability > threshold, "Yes", "No")
 ```
 
-
+## Prediction Table.
 ```{r echo=FALSE, include=FALSE}
 predicted_data %>%
   head() %>%
@@ -566,8 +559,7 @@ predicted_data %>%
   )
 ```
 
-
-## Prediction Model for the probability of sequence generation based on library concentration and Cluster Density using Random Forest model.
+## Prediction Model for the probability of sequence generation based on library concentration and Cluster Density using a Random Forest model.
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 library(caret)
 set.seed(123)
@@ -644,6 +636,4 @@ predicted_data %>%
     locations = cells_body(rows = predicted == "No", columns = predicted)
   )
 ```
-
-
 
