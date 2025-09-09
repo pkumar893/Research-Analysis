@@ -37,7 +37,7 @@ library(ggforce)
 
 
 ```{r echo=FALSE}
-# dir.exists("E:/Ajit data analysis/Tac/fecal 2024")
+# dir.exists("~/fecal 2024")
 # getwd()
 # setwd("E:\\Ajit data analysis\\Tac\\fecal 2024") 
 # setwd(original_dir)
@@ -75,7 +75,6 @@ Fecal1 <- Fecal1 %>%
   mutate(Group = as.factor(Group))
 
 table(Fecal1$Group)
-
 
 sample_info <- Fecal1 %>% select(Sample, Group) %>% mutate(Group = as.factor(Group))
 metabolite_Fecal1 <- Fecal1 %>% select(-Group)
@@ -165,7 +164,7 @@ print(pca_plot)
 #     panel.grid.major = element_line(color = "gray", size = 0.5), 
 #     panel.grid.minor = element_line(color = "gray", size = 0.25)  
 #   )
-# # ggsave("E:/Ajit data analysis/Tac/fecal set1/pca_plot.png",
+# # ggsave("~/fecal set1/pca_plot.png",
 # #          width = 20, height = 15)
 # pca_plot
 
@@ -175,7 +174,7 @@ plsda_result <- opls(scaled_Fecal1,
                     predI = 2,
                     orthoI = 0)
 
-# png("E:/Ajit data analysis/Tac/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
+# png("~/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
 # plot(plsda_result)
 # 
 # dev.off()
@@ -204,7 +203,7 @@ plsda_plot <- ggplot(plsda_Fecal1, aes(x = p1, y = p2, color = Group)) +
   scale_color_brewer(palette = "Set1")
 plsda_plot
 
-# ggsave("E:/Ajit data analysis/Tac/fecal set1/plsda_plot.png", width = 20, height = 15)
+# ggsave("~/fecal set1/plsda_plot.png", width = 20, height = 15)
 
 ```
 
@@ -288,7 +287,6 @@ ps <- phyloseq(otu, sd)
 ps
 
 
-
 # α-diversity
 alpha_plot <- plot_richness(
   ps,
@@ -323,7 +321,7 @@ print(beta_plot)
 
 ## Mice info
 ```{r}
-mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+mice_info <- read_excel("~/Tac ready to use.xlsx", 
                         sheet = 6, 
                         range = "A33:N62",
                         col_names = TRUE)
@@ -425,8 +423,6 @@ summary(fit_lasso)
 # Coefficients
 coef(fit_lasso, s = "lambda.min")
 
-
-
 y_pred <- predict(fit_lasso, newx = x, s = "lambda.min")
 
 residuals <- y - y_pred
@@ -464,17 +460,6 @@ combined_effect <- data.frame(
 combined_effect$Sample <- Fecal1$Sample
 combined_effect$group <- Fecal1$Group
 
-
-# ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg)) +
-#   geom_point(color = "steelblue", size = 3) +
-#   geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
-#   labs(x = "Combined Metabolite Effect (linear combination)", 
-#        y = "Actual Heart Mass (mg)",
-#        title = "Combined Effect of Metabolites on Heart Mass") +
-#   theme_minimal()
-
-
-
 p <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
   geom_point(size = 3) +
   geom_text_repel(aes(label = Sample), size = 4, max.overlaps = 100) +  # Sample labels
@@ -505,7 +490,7 @@ p <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = g
     plot.title = element_text(size = 30, face = "bold.italic")
   )
 
-ggsave("E:/Ajit data analysis/Tac/fecal 2024/Overall Effect of Metabolites on Heart Weight 2024 nfold 10.png",
+ggsave("~/fecal 2024/Overall Effect of Metabolites on Heart Weight 2024 nfold 10.png",
         p,
         width = 16, height = 10,
         dpi = 400)
@@ -513,7 +498,6 @@ ggsave("E:/Ajit data analysis/Tac/fecal 2024/Overall Effect of Metabolites on He
 
 
 ## Generalized Additive Model (GAM) \n Nonlinear relationships between metabolites and the mouse heart weight.
-
 ```{r}
 predictors <- setdiff(colnames(integrated_data), 
                       c("Sample", "Group", "LV_Thickness", 
@@ -570,4 +554,5 @@ summary(gam_model)
 par(mar = c(4, 4, 1, 1))  # bottom, left, top, right
 plot(gam_model, pages = 1, scheme = 1)
 ```
+
 
