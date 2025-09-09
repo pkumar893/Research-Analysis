@@ -1,0 +1,263 @@
+title: "DNS sequence"
+author: "Prashant Kumar"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: right
+    embed-resources: true
+editor: source
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(gt)
+library(ggplot2)
+library(ape)
+library(ggtree)
+library(phytools)
+library(vegan)
+library(ggtreeExtra)
+library(plotly)
+library(openxlsx)
+library(microbiomeMarker)
+library(tidyr)
+library(purrr)
+library(ggtext)
+library(scales)
+library("phyloseq")
+library("microbiome")
+```
+
+```{r}
+nextseq <- read.csv("E:/micobione core center uiowa analysis/project 1/ECMP NextSeq Run Metrics_2.csv", check.names = FALSE) %>% 
+  rename(sample_number = `Sample Number`,
+         `next_seq_run/date` = `NextSeq Run #/ Date`,
+         `library_number/date` = `Library No. / Date`,
+         panel_name = `Panel name`,
+         `loding_conc(pM)` = `Loading Conc. (pM)`,
+         cluster_density = `Cluster Density (K/mm2)`,
+         `G%` = `(G) % > = Q30`,
+         library_conc_nM = `Lib. Conc (nM)`,
+         library_dilution_2nM = `Library dilution to 2nM`,
+         AmpliSeq_Index = `AmpliSeq Index`,
+         Patient_Gender = `Patient Gender`,
+         Sample_ID = `Sample ID`,
+         Total_PF_Reads = `Total PF Reads`,
+         Amplicon_Mean_Coverage = `Amplicon Mean Coverage`,
+         Uniformity_coverage = `Uniformity of coverage (%)`,
+         Percent_Ontarget_Aligned_Reads = `Percent On-target Aligned Reads`,
+         `Total_Aligned_reads_persample(R1/R2)` =`Total Aligned reads per sample R1/R2`,
+         `Percent_Aligned_Bases(R1/R2)` = `Percent Aligned Bases R1/R2`) %>% 
+  rename_all(tolower) %>% 
+  filter(!library_conc_nm == "")
+
+
+nextseq$`next_seq_run/date`
+         
+```
+
+```{r}
+unique(nextseq$library_conc_nm)
+
+
+nextseq_new <- nextseq %>%
+  mutate(panel_name = case_when(
+    panel_name %in% c("", " ") ~ NA_character_,
+    panel_name == "ECMP " ~ "ECMP",
+    TRUE ~ panel_name),
+    library_conc_nm = as.numeric(library_conc_nm),
+    sample_number = as.numeric(sample_number)
+  ) %>% 
+  # filter(library_conc_nm == "NA")
+
+is.numeric(nextseq_new$library_conc_nm)
+sum(is.na(nextseq_new$library_conc_nm))
+
+is.numeric(nextseq_new$sample_number)
+sum(is.na(nextseq_new$sample_number))
+
+nextseq_new %>% 
+ filter(total_pf_reads == "not sequenced")
+
+unique(nextseq$nextseq$library_conc_nm)
+```
+
+
+```{r}
+
+data <- data.frame(
+  library_concentration = nextseq$library_conc_nm,
+  amplicon_mean_coverage = nextseq$amplicon_mean_coverage,
+  uniformity_coverage_percentage = nextseq$uniformity_coverage,
+  total_pf_reads = nextseq$total_pf_reads
+) %>%
+  mutate(
+    uniformity_coverage_percentage = gsub("%", "", uniformity_coverage_percentage),
+    
+    total_pf_reads = gsub(",", "", total_pf_reads)
+  ) %>% 
+  mutate(across(, as.numeric)) 
+  
+
+
+data1 <- data %>% 
+  filter(library_concentration <= 10) %>% drop_na() %>% 
+  filter(amplicon_mean_coverage < 30000)
+
+
+str(data1)
+unique(data1$amplicon_mean_coverage)
+sum(is.na(data1$amplicon_mean_coverage))
+
+# na_distribution <- data %>%
+#   group_by(library_concentration) %>%
+#   summarise(count_NA_total_pf_reads = sum(is.na(total_pf_reads)))
+
+
+na_distribution <- data %>%
+  group_by(library_concentration) %>%
+  summarise_each(funs(sum(is.na(.))))
+
+na_distribution %>% 
+  filter(library_concentration <= 10 ) %>% 
+  ggplot(aes(x=(library_concentration), y=total_pf_reads)) + 
+  geom_bar(stat="identity", fill="steelblue") + 
+  labs(title="NA Distribution by Library Concentration", x="Library Concentration", y="Count of NAs in pf")
+ggsave("E:/micobione core center uiowa analysis/project 1/fig1.tiff", width = 10, height = 10)
+
+
+data1 %>%  
+  ggplot(aes(x=library_concentration, y= amplicon_mean_coverage)) + 
+  geom_line(color ="blue") +
+  scale_y_continuous(labels = label_number()) +
+  labs(title="NA Distribution by Library Concentration", x="Library Concentration", y="amplicon mean coverage")
+ggsave("E:/micobione core center uiowa analysis/project 1/fig2.tiff", width = 10, height = 10)
+
+
+data1 %>%
+  ggplot(aes(x = library_concentration, y = amplicon_mean_coverage)) +
+  geom_line(color = "blue", size = 0.1) +
+  geom_hline(yintercept = mean(data1$amplicon_mean_coverage), 
+             color = "red", 
+             linetype = "dashed", 
+             size = 0.5) +
+  labs(title = "Mean Amplicon Coverage by Library Concentration", 
+       x = "Library Concentration", 
+       y = "Mean Amplicon Coverage")
+ggsave("E:/micobione core center uiowa analysis/project 1/fig2.tiff", width = 12, height = 8)
+```
+
+```{r}
+model1 <- lm(total_pf_reads ~ library_concentration + 
+               amplicon_mean_coverage+ 
+               uniformity_coverage_percentage, 
+             data=data, na.action=na.exclude)
+summary(model1)
+
+model2 <- lm(total_pf_reads ~ library_concentration + 
+               amplicon_mean_coverage, 
+             data=data, na.action=na.exclude)
+summary(model2)
+```
+
+
+```{r}
+mean_pf <- mean(data$total_pf_reads, na.rm = TRUE)
+min(data$total_pf_reads, na.rm = TRUE)
+
+desired_pf_reads <- mean_pf  
+
+library_concentration_seq <- seq(0, 10, by = 0.1) 
+amplicon_coverage_seq <- seq(1000, 20000, by = 100)  
+uniformity_percentage_seq <- seq(70, 95, by = 0.5)  
+
+min_lib_conc <- numeric(length(uniformity_percentage_seq))
+min_amp_cov <- numeric(length(uniformity_percentage_seq))
+
+for(i in seq_along(uniformity_percentage_seq)){
+  uni_per <- uniformity_percentage_seq[i]
+  
+  simulation_results <- expand.grid(library_concentration = library_concentration_seq,
+                                    amplicon_mean_coverage = amplicon_coverage_seq,
+                                    uniformity_coverage_percentage = uni_per)
+  simulation_results$total_pf_reads <- predict(model, newdata = simulation_results)
+  
+  valid_results <- simulation_results[simulation_results$total_pf_reads >= desired_pf_reads,]
+  
+  if(nrow(valid_results) > 0){
+    min_lib_conc[i] <- min(valid_results$library_concentration)
+    min_amp_cov[i] <- min(valid_results$amplicon_mean_coverage)
+  } else {
+    min_lib_conc[i] <- NA
+    min_amp_cov[i] <- NA
+  }
+}
+
+results_df <- data.frame(uniformity_percentage = uniformity_percentage_seq,
+                         min_library_concentration = min_lib_conc,
+                         min_amplicon_coverage = min_amp_cov)
+
+results_df
+```
+
+
+
+```{r}
+simulate_minimums <- function(desired_reads) {
+  library_seq <- seq(from = 0, to = 10, by = 0.1) 
+  amplicon_seq <- seq(from = 1000, to = 20000, by = 100)
+
+  for (lib in library_seq) {
+    for (amp in amplicon_seq) {
+      predicted_reads <- predict(model2, newdata = data.frame(library_concentration = lib, amplicon_mean_coverage = amp))
+      if (predicted_reads >= desired_reads) {
+        return(c("Library Concentration" = lib, "Amplicon Mean Coverage" = amp))
+      }
+    }
+  }
+}
+
+minimums <- simulate_minimums(50000000) 
+minimums
+
+```
+
+```{r}
+data %>% filter(library_concentration <= 50) %>%  
+  filter(total_pf_reads < 250000000) %>% 
+  ggplot(aes(x = library_concentration, y = total_pf_reads)) +
+  geom_point(aes(color = amplicon_mean_coverage), alpha = 0.3) +
+  geom_smooth(method = "lm", formula = y ~ x) +
+  scale_y_continuous(labels = label_number()) +
+  scale_color_gradient(low = "yellow", high = "red", limits = c(0, 15000)) + 
+  labs(title = "Impact of Library Concentration \n and Amplicon Mean Coverage on Total PF Reads",
+       x = "Library Concentration",
+       y = "Total PF Reads")
+ggsave("E:/micobione core center uiowa analysis/project 1/fig3.tiff", width = 10, height = 10)
+```
+
+```{r}
+p <- data %>% filter(library_concentration <= 50) %>%  
+  filter(total_pf_reads < 250000000) %>% 
+  ggplot(aes(x = amplicon_mean_coverage, y = total_pf_reads)) +
+  geom_point(aes(color = library_concentration), alpha = 0.4) +
+  geom_smooth(method = "lm", formula = y ~ x) +
+  scale_y_continuous(labels = label_number()) +
+  scale_color_gradient(low = "yellow", high = "red", limits = c(0, 20))+
+  labs(title = "Impact of  Amplicon Mean Coverage and library concentration \n on Total PF Reads",
+       x = "Amplicon Mean Coverage",
+       y = "Total PF Reads")
+
+ggplotly(p)
+ggsave("E:/micobione core center uiowa analysis/project 1/fig4.tiff", width = 16, height = 10)
+
+
+```
+
+
+
+
