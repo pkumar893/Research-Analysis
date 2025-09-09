@@ -1,0 +1,406 @@
+---
+title: "Fecal 2024 Analysis"
+author: "Prashant Kumar"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: right
+    embed-resources: true
+editor: source
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(gt)
+library(ggplot2)
+library(openxlsx)
+library(tidyverse)
+library(ropls)  # For PLS-DA
+library(pheatmap)
+library(RColorBrewer)
+library(ggpubr)
+library(factoextra)
+library(FactoMineR)
+library(limma)
+library(igraph)
+library(WGCNA)
+library(ggraph)
+library(pathview)
+library(clusterProfiler)
+library(tibble)
+library(corrplot)
+library(ggforce)
+library(ggrepel)
+library(knitr)
+```
+
+
+## Data cleaning
+```{r message=FALSE, warning=FALSE}
+Fecal2024 <- read_excel("E:\\Ajit data analysis\\Tac\\fecal 2024\\Fecal metablomics 2024.xlsx")
+
+
+metabolites <- colnames(Fecal2024)[-1]
+
+
+clean_names <- gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+clean_names <- gsub("^[0-9]+_|_[0-9]+_|_[0-9]+$|[0-9]+_", "", clean_names)
+
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[() ]", "_", metabolites)))
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+colnames(Fecal2024)[-1] <- clean_names
+
+
+metabolites <- colnames(Fecal2024)[-c(1, 2)]
+clean_names <- gsub("[() ]", "_", metabolites)
+colnames(Fecal2024)[-c(1, 2)] <- clean_names
+
+Fecal2024 <- Fecal2024 %>%
+  mutate(
+    Group = case_when(
+      grepl("WT-Sham", Sample) ~ "Sham",
+      grepl("WT-TAC-Post-V", Sample) ~ "TAC_FMT_Post",
+      grepl("WT-TAC-V-Orn-Ty-DI-", Sample) ~ "TAC_V_Orn",
+      grepl("WT-TAC-V", Sample) ~ "TAC_V",
+      grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
+      TRUE ~ "Other"
+    ), .after = "Sample"
+  ) %>% 
+  mutate(Group = as.factor(Group))
+
+sample_info <- Fecal2024 %>% 
+  select(Sample, Group) %>% 
+  mutate(Group = as.factor(Group))
+
+metabolite_Fecal2024 <- Fecal2024 %>% select(-Group)
+metabolite_Fecal2024 <- metabolite_Fecal2024 %>% column_to_rownames("Sample")
+```
+
+Metabolite names were cleaned to ensure compatibility with downstream tools. Group classification was inferred from sample IDs using string matching. Expression and metadata were split for modularity.
+
+## Mice info and Combine info.
+```{r message=FALSE, warning=FALSE}
+mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+                        sheet = 6, 
+                        range = "A33:N62",
+                        col_names = TRUE) %>% 
+  select(-S.No, -Gender)
+
+colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
+  
+integrated_data <- Fecal2024 %>%
+  left_join(mice_info, by = "Sample") %>% 
+  select(-Purpose, -`Peak LS`, -`EF (%)`) %>% 
+  rename(
+    LV_Thickness = `LV Thickness (mm)`,
+    LVW_mg = `LVW (mg)`,
+    LVW_TL = `LVW/TL (mg/mm)`,
+    HW_TL = `HW/TL (mg/mm)`,
+    FS = `FS%`,
+    HW_mg = `HW (mg)`,
+    GLS = `GLS (%)`
+  ) %>% 
+  relocate(HW_mg, .after = Sample)
+head(integrated_data, 2)
+```
+
+Heart weight and associated cardiac phenotypes were merged with metabolomic profiles by mouse ID. Variable renaming standardizes clinical traits for consistency.
+
+## Over All Predictors
+```{r message=FALSE, warning=FALSE}
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+head(predictors, 10)
+```
+
+Non-cardiac, non-group variables were selected as predictors for model fitting. These correspond to fecal metabolite concentrations.
+
+## PCA with group distribution
+```{r message=FALSE, warning=FALSE}
+scaled_Fecal2024 <- scale(metabolite_Fecal2024)
+pca_result <- prcomp(scaled_Fecal2024, scale. = TRUE)
+pca_summary <- summary(pca_result)
+
+scores_df <- data.frame(
+  PC1   = pca_result$x[, 1],
+  PC2   = pca_result$x[, 2],
+  Group = factor(sample_info$Group, levels = unique(sample_info$Group))
+)
+
+# 2)convex-hull points for each group
+hulls <- scores_df %>%
+  group_by(Group) %>%
+  slice(chull(PC1, PC2)) %>%
+  ungroup()
+
+# 3) points + smooth “curvy” hull lines
+pca_plot <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 2, alpha = 0.5) +
+
+  geom_bspline_closed(
+    data   = hulls,
+    aes(x = PC1, y = PC2, group = Group, fill = Group, color = Group),
+    n      = 70,
+    size   = 0.8,
+    alpha  = 0.2 
+  ) +
+
+  scale_color_manual(
+    values = brewer.pal(n = length(unique(scores_df$Group)), name = "Set1")
+  ) +
+  scale_fill_manual(
+    values = brewer.pal(n = length(unique(scores_df$Group)), name = "Set1")
+  ) +
+
+  labs(
+    title = "PCA of Serum metabolite Profiles",
+    x     = "PC1",
+    y     = "PC2"
+  ) +
+
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background  = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    panel.grid.minor = element_line(color = "gray", size = 0.25),
+    legend.position  = "top"
+  )
+
+pca_plot
+# ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2024/PCA_serum_2024.png",
+#        plot = pca_plot, width = 10, height = 8, dpi = 800)
+```
+
+## Generalised regulation regression model
+```{r message=FALSE, warning=FALSE}
+library(glmnet)
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+
+# Preparing data (converting to matrix)
+x <- as.matrix(integrated_data[, predictors])
+y <- integrated_data$HW_mg
+
+
+# Fit LASSO
+fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian", nfolds = 5, standardize = TRUE)
+
+# summary(fit_lasso)
+
+# Extracting coefficients from  ridge model
+coefs <- as.matrix(coef(fit_lasso, s = "lambda.min"))
+coefs_df <- data.frame(Metabolites = rownames(coefs), Coef = as.numeric(coefs))
+intercept <- coefs[1, 1] # The predicted heart mass for a sample with average levels of all metabolites
+coefs_df <- coefs_df[coefs_df$Metabolites != "(Intercept)", ]  # exclude intercept
+
+
+# Multiplying metabolite matrix (x) by coefficients to get the combined effect
+combined_effect_values <- as.vector(x %*% coefs_df$Coef + intercept)
+
+# Creating data frame with real HW_mg and combined effect
+combined_effect <- data.frame(
+  Sample = seq_len(length(y)),
+  Actual_HW_mg = as.numeric(y),
+  CombinedEffect = combined_effect_values
+)
+
+combined_effect$Sample <- Fecal2024$Sample
+combined_effect$group <- Fecal2024$Group
+
+# Plot actual heart mass vs. combined metabolite effect
+
+p2 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +  # Sample labels
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_Post" = "#2ca02c", "TAC_V" = "#9467bd", "TAC_V_Orn" = "#d62728"),
+    labels = c("Sham", "TAC", "TAC_FMT_Post", "TAC_V", "TAC_V_Orn")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 15, face = "italic", ),
+    axis.title.y = element_text(size = 15, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 20, face = "bold.italic")
+  )
+p2
+ 
+ # ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2024/Overall Effect of Metabolites on Heart Weight nfold 5.png",
+ #        p2,
+ #        width = 9, height = 6.5,
+ #        dpi = 400)
+ #
+
+p3 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 5), se = TRUE) +
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_Post" = "#2ca02c", "TAC_V" = "#9467bd", "TAC_V_Orn" = "#d62728"),
+    labels = c("Sham", "TAC", "TAC_FMT_Post", "TAC_V", "TAC_V_Orn")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 20, face = "bold.italic")
+  )
+p3
+# ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2024/Overall Effect of Metabolites on Heart Weight each group range.png",
+#        p3,
+#        width = 10, height = 7,
+#        dpi = 600)
+```
+
+* Combine Effect of Metabolites Findings:
+  * Group-specific patterns:
+    * Sham: varying combined effect (~160–200), Low heart weight (~140–160 mg) and relatively small and consistent heart weights (around the 150mg range), with minimal variability. This cluster is clearly separated from the higher clusters of treated or diseased mice.
+
+    * TAC: The TAC group distinct from all other groups. Their combined metabolite effect scores are the highest, and so are their heart weights – substantially elevated compared to Sham. this group is clustered around the 175–250mg heart weight range, reflecting significant cardiac hypertrophy. The TAC cluster is spread a bit more widely than Sham, but all TAC points still group far above and to the right of the Sham cluster, underscoring the pronounced effect of TAC surgery on both metabolite profile and heart weight.
+
+    * TAC FMT Post: TAC mice that received a post-surgery fecal microbiota transplant (FMT) show a marked downward shift in heart weight relative to untreated TAC mice. This group have heart mass closer to 150–170mg and somewhat leftward, indicating that the combined metabolite effect is reduced as well.
+    
+    * TAC V: The TAC V group also demonstrates variable heart weights and lower combined effect of metabolites. Many of the points are found near the Sham cluster at the lower left, indicating several TAC_V mice had metabolite effect in the small. However, a few points appear at moderately higher heart weights, suggesting some individuals in this group still exhibited considerable hypertrophy.
+
+    * TAC V Orn: The TAC_V_Orn group clusters very tightly with the Sham-like region of the plot. The points are largely concentrated at low heart weights (around or just above 150mg), with combined metabolite effect scores on the lower end as well. This group’s distribution overlaps extensively with the Sham cluster and Tac_v – far below the untreated TAC points – indicating that adding the Orn intervention kept heart weights nearly normal.
+
+
+## Boruta analysis 
+```{r message=FALSE, warning=FALSE}
+library(Boruta)
+set.seed(999)
+rf_data <- integrated_data[, c(predictors, "HW_mg")]
+rf_data <- na.omit(rf_data) 
+boruta_output <- Boruta(HW_mg ~ ., data = rf_data, doTrace = 2, maxRuns = 300, ntree = 1000)
+attribute_Boruta <- attStats(boruta_output)
+confirmed_var_fecal2024 <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+# confirmed_var_fecal2024
+# kable(confirmed_var_fecal2024, col.names = "IMPORTANT PRESDICTORS")
+
+boruta_list <- replicate(3, {
+  Boruta(HW_mg ~ ., data = rf_data, maxRuns = 300, ntree = 1000)
+}, simplify = FALSE)
+
+# confirmed metabolites from each run
+confirmed_lists <- lapply(boruta_list, function(b) {
+  rownames(attStats(b)[attStats(b)$decision == "Confirmed", ])
+})
+
+boruta_list
+vars_fecal2024 <- Reduce(intersect, confirmed_lists)
+kable(vars_fecal2024, col.names = "IMPORTANT PRESDICTORS")
+```
+
+* Because of the smaller sample size respect to number of variables, Boruta feature selected with 300 iterations and 1000 number of trees in the Random Forest for the increases stability and less fluctuation in variable importance. There are confirmed 4 (`r vars_fecal2024`) metabolites as statistically important over shadow variables. This method complements RF by offering a robust non-parametric significance test, reducing the risk of over-fitting.
+
+* Repeating Boruta strengthens robustness. Only consistently confirmed metabolites across runs were retained, improving generalizability. <br>
+Common metabolites in all iteration are `r vars_fecal2024`.
+
+## Boruta Important variable bar plot
+```{r, fig.width=15, fig.height=10}
+par(mar = c(15, 4, 4, 4))
+plot(boruta_output, las = 2, cex.axis = 0.8, cex.lab = 1, cex.main = 1, xlab = "", main = "Important Variable")
+
+## Plot results
+# png("E:/Ajit data analysis/Tac/new analysis/fecal 2024/final trend of metabolites.png",
+#     width = 30, height = 20, units = "in", res = 300)
+# par(mar = c(30, 10, 10, 10))
+# plot(boruta_output, las = 2, cex.axis = 1.5, cex.lab = 2, cex.main = 3, xlab = "", main = "Important Variable")
+# dev.off()
+```
+
+## Checking Significant Metabolites using common Predictors of Boruta
+```{r, message=FALSE, warning=FALSE}
+library(mgcv)
+formula <- as.formula(paste("HW_mg ~", paste0("s(", vars_fecal2024, ", by = Group)", collapse = " + ")))
+model <- gam(formula, data = integrated_data, method = "REML", select  = TRUE)
+summary(model)
+```
+
+**Findings with considering the group:**
+
+* Model Summary: GAM with Group-Dependent Effects
+  * Adjusted R²: ~0.962, deviance explained 98.5%. 
+  * The intercept of the model is 160.86 (p < 0.001), which represents the baseline heart weight (in mg) for the reference condition when metabolite effects are at their reference values.
+
+* Significant Metabolite Effects by Group:
+  * Cadaverine:
+    * Sham, TAC_FMT_Post, TAC_V_Orn : No significant effect (p = 0.208667,  0.807864, and 0.823526. and edf ~ 0). 
+      * The model suggests that in healthy controls and those specific treated TAC groups, changes in Cadaverine levels have no detectable effect on heart weight. The smooth terms for these groups were essentially flat (no slope), implying any fluctuation in Cadaverine is unrelated to the outcome in those conditions.
+      
+    * TAC : significant effect (p = 0.0334), edf ~ 0.36 suggest that smoothing term for Cadaverine in TAC was heavily shrunk, indicating a linear relationship.
+      * Cadaverine levels in TAC show a significant linear relationship with heart weight, as Cadaverine changes, heart weight changes in a consistent direction.
+
+    * TAC_V : Highly significant (p = 1.83e-05), and edf~ 4.15 that indicate there is Cadaverine’s impact on heart weight in TAC_V is not a simple straight line, the relationship likely has multiple inflection curvature (more complex pattern).
+    
+**Interpretation:** Cadaverine’s emerges as an important predictor in the untreated TAC model and especially in the TAC_V treatment condition, where its relationship with heart weight is both strong and complex. Under normal conditions (Sham) or other interventions (FMT_Post, V_Orn), Cadaverine does not significantly impact heart weight.
+
+  * Glyceraldehyde Phosphate
+    * Sham, TAC_FMT_Post, TAC_V_Orn: No significant effect(p > 0.5).
+      * Glyceraldehyde phosphate shows no significant relationship with heart weight, with near-zero edf for those smooths.
+    * TAC : Significant association (p ~ 0.0026). In TAC, Glyceraldehyde phosphate is significantly associated with heart weight. 
+      * The edf ~0.74 for this smooth suggests the relationship is approximately linear. 
+      * In the TAC group, heart weight tends to increase or decrease roughly in a straight-line with Glyceraldehyde phosphate levels.
+    * TAC_V :Highly significant (p = 0.000472), mildly non-linear association. 
+      * In TAC_V, the Glyceraldehyde phosphate effect on heart weight is very strong with edf ~1.66. This indicates a significant curvilinear relationship: as Glyceraldehyde phosphate changes, heart weight changes in a pattern that has some curvature (edf > 1), though not extremely complex. 
+      * The association remains strong under this treatment, suggesting that Glyceraldehyde phosphate is an important predictor of heart weight when the “V” intervention is applied, and its effect might accelerate or decelerate at different metabolite levels.
+      
+**Interpretation:** Glyceraldehyde phosphate is a significant predictor of heart weight primarily in the diseased state (TAC) and under the TAC_V treatment.
+
+  * Hypotaurine
+    * Sham, TAC_FMT_Post, TAC_V, TAC_V_Orn: No significant effect (p > 0.05 and edf ~0 in each case).
+    * TAC : Significant association(p = 0.0107). Hypotaurine show a significant relationship with heart weight. The edf ~ 0.86 suggests the pattern is essentially linear. In TAC, Hypotaurine levels correlate linearly with heart weight, as Hypotaurine increases or decreases, heart weight tends to increase or decrease proportionally.
+    
+    * Itaconic Acid
+      * Sham, TAC_V_Orn: No significant effect(p > 0.05 and edf ~ 0).
+        * Healthy controls and TAC receiving the V+Orn intervention show no detectable heart weight changes in response to Itaconic acid levels.
+      * TAC: Highly significant(p = 0.000162), non-linear association (edf ~ 2.92).
+        * Itaconic acid has a very strong effect on heart weight and a highly non-linear relationship. High F and significance also reflect that this metabolite association with heart weight in TAC is one of the strongest observed in the model.
+      * TAC_FMT_Post : Significant, moderately non-linear association. 
+        * In TAC_FMT_Post, the relationship between Itaconic acid and heart weight remains significant (F = 78.04, p = 0.0180) with edf ~1.76. This indicates a significant association with some curvature but is less complex than in untreated TAC.
+      * TAC_V: Significant, near-linear association. 
+        * In TAC_V, Itaconic acid also shows a significant effect on heart weight (F ~ 1.098, p ~ 0.0070) with edf ~0.82. The model suggests a small but significant linear effect.
+        
+**Interpretation:** Itaconic acid exhibits one of the strongest and most group-specific effects on heart weight.
+
+
+---

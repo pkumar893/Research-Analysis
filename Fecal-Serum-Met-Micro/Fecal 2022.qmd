@@ -1,0 +1,542 @@
+---
+title: "Fecal 2022 Analysis"
+author: "Prashant Kumar"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: right
+    embed-resources: true
+editor: source
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(gt)
+library(ggplot2)
+library(openxlsx)
+library(tidyverse)
+library(ropls)  # For PLS-DA
+library(pheatmap)
+library(RColorBrewer)
+library(ggpubr)
+library(factoextra)
+library(FactoMineR)
+library(limma)
+library(igraph)
+library(WGCNA)
+library(ggraph)
+library(pathview)
+library(clusterProfiler)
+library(tibble)
+library(corrplot)
+library(ggforce)
+library(ggrepel)
+```
+
+
+## Data cleaning
+```{r warning=FALSE, message=FALSE}
+Fecal1 <- read_excel("E:/Ajit data analysis/Tac/Fecal metablomics 2022 set 1.xlsx")
+
+metabolites <- colnames(Fecal1)[-1]
+
+
+clean_names <- gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+clean_names <- gsub("^[0-9]+_|_[0-9]+_|_[0-9]+$|[0-9]+_", "", clean_names)
+
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[() ]", "_", metabolites)))
+# gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
+
+colnames(Fecal1)[-1] <- clean_names
+
+Fecal1 <- Fecal1 %>%
+  mutate(
+    Group = case_when(
+      grepl("WT-Sham", Sample) ~ "Sham",
+      grepl("WT-TAC-FMT-V", Sample) ~ "TAC_FMT_V",
+      grepl("WT-TAC-FMT-S", Sample) ~ "TAC_FMT_S",
+      grepl("WT-TAC-V", Sample) ~ "TAC_V",
+      grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
+      TRUE ~ "Other"
+    ), .after = "Sample"
+  ) %>% 
+  mutate(Group = as.factor(Group))
+
+sample_info <- Fecal1 %>% 
+  select(Sample, Group) %>% 
+  mutate(Group = as.factor(Group))
+
+metabolite_fecal2022 <- Fecal1 %>% select(-Group)
+metabolite_fecal2022 <- metabolite_fecal2022 %>% column_to_rownames("Sample")
+```
+
+Metabolite names were cleaned to ensure compatibility with downstream tools. Group classification was inferred from sample IDs using string matching. Expression and metadata were split for modularity.
+
+## Mice info and Combine info.
+```{r}
+mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+                        sheet = 6, 
+                        range = "A2:N31",
+                        col_names = TRUE) %>% 
+  select(-S.No, -Gender)
+colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
+  
+integrated_data <- Fecal1 %>%
+  left_join(mice_info, by = "Sample") %>% 
+  select(-Purpose, -`Peak LS`, -`EF (%)`) %>% 
+  rename(
+    LV_Thickness = `LV Thickness (mm)`,
+    LVW_mg = `LVW (mg)`,
+    LVW_TL = `LVW/TL (mg/mm)`,
+    HW_TL = `HW/TL (mg/mm)`,
+    FS = `FS%`,
+    HW_mg = `HW (mg)`,
+    GLS = `GLS (%)`
+  ) %>% 
+  relocate(HW_mg, .after = Sample)
+head(integrated_data, 2)
+```
+
+Heart weight and associated cardiac phenotype were merged with metabolic profiles by mouse ID. Variable renaming standardizes clinical traits for consistency.
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+## Over All Predictors
+library(kableExtra)
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+predictors
+
+
+n_pad <- 2 - length(predictors) %% 2
+if (n_pad < 2) predictors <- c(predictors, rep("", n_pad))
+
+predictor_matrix <- matrix(predictors, ncol = 2, byrow = TRUE)
+
+kable(predictor_matrix, col.names = c("Predictors", "Predictors"))
+```
+
+## PCA with group distribution
+```{r message=FALSE, warning=FALSE}
+scaled_Fecal2022 <- scale(metabolite_fecal2022)
+pca_result <- prcomp(scaled_Fecal2022, scale. = TRUE)
+pca_summary <- summary(pca_result)
+
+scores_df <- data.frame(
+  PC1   = pca_result$x[, 1],
+  PC2   = pca_result$x[, 2],
+  Group = factor(sample_info$Group, levels = unique(sample_info$Group))
+)
+
+# 2)convex-hull points for each group
+hulls <- scores_df %>%
+  group_by(Group) %>%
+  slice(chull(PC1, PC2)) %>%
+  ungroup()
+
+# 3) points + smooth “curvy” hull lines
+pca_plot <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 2, alpha = 0.5) +
+
+  geom_bspline_closed(
+    data   = hulls,
+    aes(x = PC1, y = PC2, group = Group, fill = Group, color = Group),
+    n      = 70,
+    size   = 0.8,
+    alpha  = 0.2 
+  ) +
+
+  scale_color_manual(
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd" )
+  ) +
+  scale_fill_manual(
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd" )
+  ) +
+
+  labs(
+    title = "PCA of Serum metabolite Profiles",
+    x     = "PC1",
+    y     = "PC2"
+  ) +
+
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background  = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    panel.grid.minor = element_line(color = "gray", size = 0.25),
+    legend.position  = "top"
+  )
+
+pca_plot
+# ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2022/PCA_serum_2024.png",
+#        plot = pca_plot, width = 10, height = 8, dpi = 800)
+
+
+```
+
+## Generalised regulation regression model
+```{r message=FALSE, warning=FALSE}
+library(glmnet)
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+
+# Preparing data (converting to matrix)
+x <- as.matrix(integrated_data[, predictors])
+y <- integrated_data$HW_mg
+
+
+# Fit Elastic net
+fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian", nfolds = 5, standardize = TRUE)
+
+# summary(fit_lasso)
+
+# Extracting coefficients from Elastic net  ridge model
+coefs <- as.matrix(coef(fit_lasso, s = "lambda.min"))
+coefs_df <- data.frame(Metabolites = rownames(coefs), Coef = as.numeric(coefs))
+intercept <- coefs[1, 1] # The predicted heart mass for a sample with average levels of all metabolites
+coefs_df <- coefs_df[coefs_df$Metabolites != "(Intercept)", ]  # exclude intercept
+
+
+# Multiplying metabolite matrix (x) by coefficients to get the combined effect
+combined_effect_values <- as.vector(x %*% coefs_df$Coef + intercept)
+
+# Creating data frame with real HW_mg and combined effect
+combined_effect <- data.frame(
+  Sample = seq_len(length(y)),
+  Actual_HW_mg = as.numeric(y),
+  CombinedEffect = combined_effect_values
+)
+
+combined_effect$Sample <- Fecal1$Sample
+combined_effect$group <- Fecal1$Group
+
+# Plot actual heart mass vs. combined metabolite effect
+
+p2 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  # geom_smooth(method = "loess", se = FALSE, size = 0.5) +
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +  # Sample labels
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd" ),
+    labels = c("Sham", "TAC", "TAC FMT S", "TAC FMT V", "TAC V")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 15, face = "italic", ),
+    axis.title.y = element_text(size = 15, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 20, face = "bold.italic")
+  )
+p2
+
+ # ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2022/Overall Effect of Metabolites on Heart Weight.png",
+ #        p2,
+ #        width = 9, height = 6.5,
+ #        dpi = 400)
+
+p3 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 5), se = TRUE) +  # Smooth, not too wiggly
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +  # Overall linear fit
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_FMT_S" = "#2ca02c", "TAC_FMT_V" = "#d62728", "TAC_V" = "#9467bd"),
+    labels = c("Sham", "TAC", "TAC FMT S", "TAC FMT V", "TAC V")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 20, face = "bold.italic")
+  )
+p3
+
+# ggsave("E:/Ajit data analysis/Tac/new analysis/fecal 2022/Overall Effect of Metabolites on Heart Weight each group range.png",
+#        p3,
+#        width = 10, height = 7,
+#        dpi = 400)
+```
+
+* Combine Effect of Metabolites Findings:
+
+  * Group-specific patterns:
+    * Sham: Low combined effect (~165–180), Low heart weight (~100–150 mg) and Tight cluster with low variance
+
+    * TAC: wider spread combined effect, and Heart weight is higher and more variable. TAC group had divergent metabolic responses, and partial correlation with heart weight.
+
+    * TAC FMT S: Highest combined metabolite effects and Highest heart weights (up to ~300 mg). Very strong linear trend, nearly perfectly aligned with the global trend line. Suggests FMT S restored or enhanced a metabolite profile strongly linked to increased heart weight
+
+    * TAC FMT V: There is non linear metabolite effect on heart weight.
+
+    * TAC V (purple): Very low correlation between metabolite effect and heart weight
+
+
+## Boruta analysis 
+```{r message=FALSE, warning=FALSE}
+library(Boruta)
+set.seed(999)
+rf_data <- integrated_data[, c(predictors, "HW_mg")]
+rf_data <- na.omit(rf_data) 
+boruta_output <- Boruta(HW_mg ~ ., data = rf_data, doTrace = 2, maxRuns = 500, ntree = 1000)
+attribute_Boruta <- attStats(boruta_output)
+confirmed_var_fecal2022 <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+confirmed_var_fecal2022
+# kable(confirmed_var_fecal2022, col.names = "IMPORTANT PRESDICTORS")
+
+boruta_list <- replicate(3, {
+  Boruta(HW_mg ~ ., data = rf_data, maxRuns = 500, ntree = 1000)
+}, simplify = FALSE)
+
+# confirmed metabolites from each run
+confirmed_lists <- lapply(boruta_list, function(b) {
+  rownames(attStats(b)[attStats(b)$decision == "Confirmed", ])
+})
+
+boruta_list
+vars_fecal2022 <- Reduce(intersect, confirmed_lists)
+kable(vars_fecal2022, col.names = "IMPORTANT PRESDICTORS")
+# kable(confirmed_var_fecal2022, col.names = "IMPORTANT PRESDICTORS")
+```
+
+* Method: Boruta Feature Selection
+  * Boruta is an all-relevant feature selection method that iteratively compares the importance of real features against randomized “shadow” features[1]. 
+  * In each iteration, shuffled copies of the original predictors (the shadows) are added to the data; a random forest model is then trained on this augmented dataset, and the importance score of each original feature is compared to the highest importance among the shadows[1]. 
+  * Features that consistently outperform the best shadow feature are confirmed as important, whereas those consistently underperforming are rejected as irrelevant[2]. This approach effectively selects the full set of truly informative attributes by using random permutations as a baseline[3]. 
+  * In the analysis, we ran Boruta with 500 maximum runs and 1000 trees in the random forest, and repeated this procedure three times for robustness. The confirmed metabolite lists from each run were intersected to yield a stable set of important predictors present in all replicates.
+
+* Key Metabolite Predictors:
+  * Across the Boruta runs, we identified eight metabolites that were consistently flagged as important predictors of heart weight. These metabolites are listed below (common names given where applicable), along with brief notes on their biological relevance:
+    * Arachidic acid (Eicosanoic acid) – a 20-carbon saturated fatty acid. Higher levels of arachidic acid have been associated with a decreased risk of incident heart failure in epidemiological studies[4], suggesting a potential protective role in cardiac health.
+    * Heptadecanoic acid (17:0) – a 17-carbon odd-chain saturated fatty acid, often derived from dairy fat. Circulating heptadecanoic acid is noted as a biomarker of dairy intake and has been linked with lower risk of cardiovascular disease in meta-analyses[5].
+    * Beta Alanine – a non-essential (non-proteinogenic) amino acid. β-Alanine is the rate-limiting precursor for carnosine synthesis in muscle; supplementation with Beta Alanine increases muscle carnosine content, enhancing buffering capacity and improving high-intensity exercise performance[6]. Its inclusion as an important feature may reflect shifts in muscle or metabolic activity.
+    * Fumarate – a dicarboxylic acid intermediate in the citric acid cycle (Krebs cycle). Fumarate is produced by the oxidation of succinate and is subsequently converted to malate by fumarase[7]. As a TCA cycle metabolite, it indicates core energy metabolism status, which could be linked to cardiac energy utilization or mitochondrial function.
+    * Inosine – a purine nucleoside (hypoxanthine riboside) formed in purine metabolism and from ATP degradation. Inosine has known cardioprotective and anti-inflammatory effects[8]. Notably, higher urinary inosine levels have been found to be inversely associated with coronary heart disease risk in men[9], aligning with its identification as a positive predictor in our analysis.
+    * Methionine – an essential sulfur-containing amino acid involved in methylation reactions. Methionine metabolism is tightly linked to homocysteine levels; excess methionine can elevate homocysteine, a known risk factor for cardiovascular disease (elevated homocysteine is associated with higher risk of heart attack and stroke)[10]. Thus, methionine’s importance may relate to methylation capacity or cardiovascular risk pathways.
+    * Pantothenic acid – also known as vitamin B5. Pantothenic acid is required to synthesize coenzyme A (CoA), an essential cofactor in energy metabolism for the synthesis and breakdown of fats, carbohydrates, and proteins[11]. Its selection suggests a link between vitamin B5 (and thus CoA availability) and heart tissue growth or energy turnover. Interestingly, pantothenic acid is composed of pantoic acid and beta-alanine[12], which echoes the concurrent selection of β-alanine.
+    * Tryptophan – an essential aromatic amino acid. Tryptophan is necessary for protein synthesis and is the precursor for several important biomolecules, including the neurotransmitter serotonin, the hormone melatonin, and niacin (vitamin B3)[13]. Its importance in our model could reflect influences of tryptophan metabolism or downstream products (e.g. serotonin or kynurenine pathway metabolites) on cardiac physiology, potentially via neuro-hormonal or immunomodulatory effects.
+
+
+## Boruta Important variable bar plot
+```{r, fig.width=15, fig.height=10}
+par(mar = c(15, 4, 4, 4))
+plot(boruta_output, las = 2, cex.axis = 0.8, cex.lab = 1, cex.main = 1, xlab = "", main = "Important Variable")
+
+# # Plot results
+# png("E:/Ajit data analysis/Tac/new analysis/fecal 2022/final trend of metabolites.png",
+#     width = 30, height = 20, units = "in", res = 300)
+# par(mar = c(30, 10, 10, 10))
+# plot(boruta_output, las = 2, cex.axis = 1.5, cex.lab = 2, cex.main = 3, xlab = "", main = "Important Variable")
+# dev.off()
+```
+
+**Conclusion:**
+Using the Boruta algorithm, I have filtered a complex metabolomic dataset down to key predictors for heart weight. The confirmed metabolites span diverse biochemical classes – fatty acids, amino acids, vitamins, and nucleosides (`r vars_fecal2022`) – underscoring that cardiac growth or remodeling is influenced by multifaceted metabolic pathways. Many of these features have known roles in energy metabolism or cardiovascular health, lending face validity to their selection (e.g. odd-chain and very-long-chain fatty acids with cardioprotective associations[4][5], or metabolites like inosine with cardioprotective and anti-inflammatory properties[9]). These important predictors will be the focus of further statistical modeling and biological interpretation. In subsequent analyses, we will explore how these metabolites jointly predict heart weight and what mechanistic insights they might reveal about metabolic influences on cardiac mass. By concentrating on these influential metabolites, we aim to improve the model’s predictive power and deepen our understanding of the metabolic underpinnings of the phenotype.
+
+
+```{r include=FALSE}
+## New analysis for predictor selection using Random forest
+library(randomForest)
+library(caret)
+
+# Prepare data
+rf_data <- integrated_data[, c(predictors, "HW_mg")]
+rf_data <- na.omit(rf_data)
+
+# Define x and y properly
+x <- rf_data[, predictors]       # Predictor matrix only
+y <- rf_data$HW_mg               # Outcome variable
+
+# Set up RFE control with Random Forest
+set.seed(123)
+ctrl <- rfeControl(
+  functions = rfFuncs,
+  method = "repeatedcv",
+  repeats = 5,
+  number = 5,
+  verbose = TRUE
+)
+
+# Run RFE
+set.seed(123)
+rfe_rf <- rfe(
+  x = x,
+  y = y,
+  sizes = c(5, 10, 15, 20, 30),
+  rfeControl = ctrl
+)
+
+# Output results
+print(rfe_rf)
+predictors(rfe_rf)           # Selected top features
+plot(rfe_rf, type = c("g", "o"))
+
+rfe_rf$results
+varImp(rfe_rf$fit)
+selected_metabolites <- predictors(rfe_rf)
+```
+
+
+## Checking Significant Metabolites using common Predictors of Random Forest and Boruta
+```{r, message=FALSE, warning=FALSE}
+library(mgcv)
+formula <- as.formula(paste("HW_mg ~", paste0("s(", vars_fecal2022, ", by = Group)", collapse = " + ")))
+model <- gam(formula, data = integrated_data, method = "REML", select  = TRUE)
+summary(model)
+```
+
+**Findings with considering the group:** <br>
+
+* Model Summary: GAM with Group-Dependent Effects
+
+  * Adjusted R²: ~0.999. High R² suggests the model nearly perfectly explains the variation in HW_mg in this dataset. (This could be due to genuine strong effects or potential overfitting, given the small sample size ).
+  * Intercept : 224.781 (p < 0.001), which represents the baseline HW_mg (in the reference scenario when all smooth effects are at their baseline). Essentially, this is roughly the average heart weight for the reference group when metabolite effects are centered.
+
+* **NOTE:** For each smooth term s(variable, by = Group), the effective degrees of freedom (edf) and p-value indicate whether that metabolite has a significant association with Heart weight (HW_mg) in a given group. An edf near 1 suggests an approximately linear relationship, edf > 1 implies a nonlinear relationship, and an edf near 0 means the model found no effect. I will focus on terms with p < 0.05, indicating a statistically significant effect of the metabolite on HW_mg in that group.
+  
+* Significant Metabolite Effects by Group:
+
+  * Arachidic acid (Eicosanoic acid):
+    * Sham & TAC: No significant effect on HW_mg (p = 0.83 and 0.73; edf ~0, indicating a flat relationship)
+    * TAC_FMT_S: p = 0.019, Arachidic acid is associated with HW_mg in this group. edf is ~0 indicating the relationship might be roughly linear or weak.
+    * TAC_FMT_V: Highly significant effect (p < 2e-16) with edf ≈ 0.999 (~linear). There is strong association between Arachidic acid and HW_mg in this group.
+    * TAC_V: Highly significant (p < 2e-16) with edf ≈ 0.999 (~linear). A similarly strong linear relationship exists in TAC_V group.
+    
+**Interpretation :** In groups with TAC plus FMT_V or TAC_V, variations in Arachidic acid are strongly linked to heart weight changes.
+    
+  * beta-Alanine:
+    * Sham & TAC: (p = 0.99 and 0.38; edf ~0 for both)
+    * TAC_FMT_S: Significant (p ≈ 0.0014) with edf ≈ 0.813. Mostly linear effect of Beta Alanine on HW_mg.
+    * TAC_FMT_V: No significant effect (p = 0.59; edf ~0).
+    * TAC_V: Significant (p ≈ 0.00086) with edf ≈ 0.
+    
+**Interpretation :** Metabolite is relevant only under certain treatment conditions (FMT from donor S and the TAC+V intervention).
+
+  * Fumarate:
+    * Sham: Highly significant (p = 2.9e-08) with edf ≈ 0.998. Fumarate is strongly linearly associated with HW_mg.
+    * TAC: No significant effect (p = 0.49; edf ~0).
+    * TAC_FMT_S: Highly significant (p = 3.17e-05) with edf ≈ 1.341. There is a strong relationship in this group, possibly slightly nonlinear. Fumarate levels in TAC_FMT_S correlate with heart weight changes.
+    * TAC_FMT_V: No significant effect (p = 0.495; edf ~0).
+    * TAC_V: Significant (p = 0.00022) with edf ≈ 1.116.
+    
+**Interpretation :** Fumarate has a significant effect on heart weight in Sham, TAC_FMT_S, and TAC_V groups.
+
+  * Heptadecanoic acid (C17:0 fatty acid):
+    * Sham: No effect (p = 0.903; edf ~0).
+    * TAC: Not significant (p = 0.23; edf ≈ 0.503).
+    * TAC_FMT_S: Highly significant (p = 1.47e-05) with edf ≈ 0.9317.
+    * TAC_FMT_V: No effect (p = 0.617; edf ~0).
+    * TAC_V; Significant but no effect (p = 0.00464) with edf ~0
+
+  * Inosine:
+    * Sham: Significant (p = 0.0094) with edf ≈ 0.94. Inosine is associated with HW_mg in Sham(approx. linear trend).
+    * TAC: Significant (p = 1.76e-05) with edf ≈ 0.995. In TAC, Inosine also shows a strong linear relationship to heart weight.
+    * TAC_FMT_S: No effect (p = 0.356; edf ~0).
+    * TAC_FMT_V: No effect (p = 0.356; edf ~0).
+    * TAC_V: Significant (p = 0.000765) with edf ≈ 0.912. In TAC_V, Inosine again correlates strongly with HW_mg (linear trend).
+    
+**Interpretation:** Inosine is a significant predictor of heart weight in the Sham, TAC, and TAC_V groups, but interestingly not in either FMT group. This suggests that fecal microbiota transplant (FMT) interventions might disrupt or change the relationship between inosine levels and heart weight.
+
+  * Methionine:
+    * Sham: Highly significant (p = 3.25e-05) with edf ≈ 0.995. Methionine has a strong linear effect on HW_mg in Sham.
+    * TAC: Significant (p = 0.00169) with edf ≈ 0.972. Also a significant (linear) effect in TAC group.
+    * TAC_FMT_S: Significant (p = 0.001495) with edf ~0 (indicating a non-zero linear effect). So, Methionine influences HW_mg in FMT_S as well.
+    * TAC_FMT_V: No significant effect (p = 0.244; edf ~0).
+    * TAC_V: Highly significant (p = 0.00021) with edf ≈ 2.915. In TAC_V, Methionine has a very strong effect and the edf ~2.9 suggests a non-linear relationship.
+
+**Interpretation:** Methionine is consistently important in almost all groups (Sham, TAC, TAC_FMT_S, TAC_V) except TAC_FMT_V. Particularly in TAC_V, the relationship may be complex (non-linear).
+
+  * Pantothenic acid (Vitamin B5):
+    * Sham: No effect (p = 0.981; edf ~0).
+    * TAC: Highly significant (p = 7.05e-07) with edf ≈ 0.998. Pantothenic acid is strongly (linearly) associated with HW_mg in the TAC group.
+    * TAC_FMT_S: Marginally significant (p = 0.0448) with edf ~0. This suggests a very weak linear effect in FMT_S.
+    * TAC_FMT_V: No effect (p = 0.505; edf ~0).
+    * TAC_V: No effect (p = 0.116; edf ~0).
+    
+**Interpretation:** Pantothenic acid shows a significant positive association with heart weight in the untreated TAC group (possibly indicating that higher Vitamin B5 correlates with larger heart weight in diseased hearts). This effect is mostly absent or greatly reduced in other groups, especially in both FMT groups and TAC_V, that means interventions may nullify Pantothenic acid’s influence on heart weight.
+
+  * Tryptophan:
+    * Sham: Highly significant (p = 1.38e-06) with edf ≈ 0.997. In Sham, Tryptophan has a very strong linear relationship with HW_mg.
+    * TAC: No effect (p = 0.489; edf ~0).
+    * TAC_FMT_S: Highly significant (p < 2e-16) with edf ≈ 1.876. In FMT_S, Tryptophan is very strongly associated with HW_mg, and edf ~1.876 indicates a somewhat nonlinear effect (perhaps an initial increase then plateau).
+    * TAC_FMT_V: Highly significant (p = 0.000309) with edf ≈ 3.983. In FMT_V, Tryptophan is also strongly associated with HW_mg, with a more complex nonlinear relationship (edf ~4 suggests a highly wiggly curve – possibly multi-phase effect).
+    * TAC_V: Significant (p = 0.014) with edf ~0. The effect in TAC_V is present but linear and relatively weak (p just above 0.01).
+
+**Interpretation:** Tryptophan is a key predictor of heart weight in most groups (Sham and both FMT-treated groups show very strong effects), though it is not significant in the untreated TAC group. This may mean that in normal controls and when the microbiome is modulated (FMT), Tryptophan levels correlate with heart weight, but in the untreated disease state (TAC alone) that relationship disappears. The FMT_V group shows a particularly complex Tryptophan–HW_mg relationship (possibly indicating an optimal range or nonlinear dose-response after that specific treatment).
+
+
+* Findings:
+
+  * Group-specific Effects: metabolites like Arachidic acid, beta-Alanine, Fumarate, Heptadecanoic acid, show strong associations with heart weight in some intervention groups (especially TAC with FMT treatments) but not in others. This suggests an interaction between the treatment (Group) and metabolite effects.
+  
+  * Control vs Treatment: Some metabolites (such as Fumarate, Inosine, Methionine, Tryptophan) are significant in Sham (healthy controls), indicating they naturally correlate with heart weight, but their effects can change under disease (TAC) or treatment (FMT). A few metabolites lost significance in the TAC group but regained significance with FMT interventions, suggesting that microbiota transplant might restore or alter certain metabolic influences on heart pathology.
+  * Linear vs Nonlinear Effects: Most significant smooths had edf ~1, implying roughly linear relationships between metabolite concentration and heart weight in those cases. However, a few cases (such as Tryptophan in FMT groups, Methionine in TAC_V) have edf > 1, suggesting more complex, nonlinear effects..
+
+
+## References
+
+1. R Core Team. (2024). *The Comprehensive R Archive Network (CRAN)*. Retrieved from https://cran.r-project.org
+
+2. Kursa, M. B. (2024). *Boruta Package Vignette: In a Hurry*. Retrieved from https://cran.r-project.org/web/packages/Boruta/vignettes/inahurry.pdf
+
+3. Kursa, M. B. (2024). *Boruta Package - RDocumentation*. Retrieved from https://www.rdocumentation.org/packages/Boruta/versions/1.4
+
+4. Wende, A. R., & Abel, E. D. (2023). *Integrated Control of Fatty Acid Metabolism in Heart Failure*. Metabolites, 13(5), 615. https://www.mdpi.com/2218-1989/13/5/615
+
+5. Khaw, K.-T., et al. (2021). *Biomarkers of dairy fat intake, incident cardiovascular disease, and all-cause mortality: A cohort study, systematic review, and meta-analysis*. PLOS Medicine, 18(9), e1003763. https://journals.plos.org/plosmedicine/article?id=10.1371/journal.pmed.1003763
+
+6. Hobson, R. M., et al. (2012). *Role of beta-alanine supplementation on muscle carnosine and exercise performance*. Journal of Strength and Conditioning Research. https://pubmed.ncbi.nlm.nih.gov/20479615/
+
+7. Wikipedia contributors. (2024). *Citric acid cycle*. Wikipedia. https://en.wikipedia.org/wiki/Citric_acid_cycle
+
+8. Chen, Y., et al. (2022). *Inosine: A bioactive metabolite with multimodal actions in human diseases*. Frontiers in Pharmacology, 13, 1043970. https://www.frontiersin.org/journals/pharmacology/articles/10.3389/fphar.2022.1043970/full
+
+9. Tyagi, N., et al. (2015). *Role of homocysteine in the development of cardiovascular disease*. PMC. https://pmc.ncbi.nlm.nih.gov/articles/PMC4326479/
+
+10. Wikipedia contributors. (2024). *Pantothenic acid*. Wikipedia. https://en.wikipedia.org/wiki/Pantothenic_acid
+
+11. Wikipedia contributors. (2024). *Tryptophan*. Wikipedia. https://en.wikipedia.org/wiki/Tryptophan
+
+---
+
+
+
+
+
+
