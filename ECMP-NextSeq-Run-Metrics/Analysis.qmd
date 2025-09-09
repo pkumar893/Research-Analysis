@@ -1,0 +1,649 @@
+---
+author: "Prashant Kumar"
+format: 
+  html:
+    code-fold: true
+    toc: true
+    toc-location: right
+    embed-resources: true
+editor: source
+---
+
+# <span style="color:blue;">DNA sequence Generation Prediction</span>
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(gt)
+library(ggplot2)
+library(plotly)
+library(openxlsx)
+library(tidyr)
+library(scales)
+library(pROC)
+```
+
+
+## Data Cleaning
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+data <- read.csv("E:/micobiome core center uiowa analysis/project 1/ECMP NextSeq Run Metrics_2.csv", check.names = FALSE) %>% 
+  .[, -11] %>%  
+  rename(sample_number = `Sample Number`,
+         next_seq_run = `NextSeq Run #/ Date`,
+         library_number = `Library No. / Date`,
+         panel_name = `Panel name`,
+         `loding_conc(pM)` = `Loading Conc. (pM)`,
+         cluster_density = `Cluster Density (K/mm2)`,
+         `G%` = `(G) % > = Q30`,
+         library_conc_nM = `Lib. Conc (nM)`,
+         library_dilution_2nM = `Library dilution to 2nM`,
+         AmpliSeq_Index = `AmpliSeq Index`,
+         Patient_Gender = `Patient Gender`,
+         Sample_ID = `Sample ID`,
+         Total_PF_Reads = `Total PF Reads`,
+         Amplicon_Mean_Coverage = `Amplicon Mean Coverage`,
+         Uniformity_coverage = `Uniformity of coverage (%)`,
+         Percent_Ontarget_Aligned_Reads = `Percent On-target Aligned Reads`,
+         `Total_Aligned_reads_persample(R1/R2)` =`Total Aligned reads per sample R1/R2`,
+         `Percent_Aligned_Bases(R1/R2)` = `Percent Aligned Bases R1/R2`) %>% 
+  rename_all(tolower) %>% 
+  select(sample_number, library_conc_nm, total_pf_reads,
+         amplicon_mean_coverage, cluster_density, 
+         uniformity_coverage) %>%
+    mutate(
+    total_pf_reads = gsub(",", "", total_pf_reads),
+    total_pf_reads = ifelse(
+      total_pf_reads %in% c(" ","","Not Sequenced", "NA", 
+                            "not Sequenced", 
+                            "CTS Decalcified", 
+                            "not sequenced", 
+                            "***failed library, repeat next run***",
+                            "***failed library repeat next run***"),
+      NA, total_pf_reads),
+    amplicon_mean_coverage = ifelse(
+      amplicon_mean_coverage %in% c(" ","","Not Sequenced", "NA", 
+                                    "not Sequenced",
+                                    "CTS Decalcified", "not sequenced", 
+                                    "**Failed library prep, column clean and repeat next run**"), 
+                                    NA, amplicon_mean_coverage), 
+    amplicon_mean_coverage = ifelse(
+      amplicon_mean_coverage == "87.43.5", "8743.5", 
+      amplicon_mean_coverage),
+    uniformity_coverage = as.numeric(gsub("%", "", uniformity_coverage)),
+    cluster_density = gsub("\\s*\\+/-.*", "", cluster_density),
+    cluster_density = as.numeric(cluster_density)
+  ) %>% 
+    filter(
+    !library_conc_nm %in% c("", " ",
+                            "Removed",
+                            "not sequenced",
+                            "no dilution",
+                            "run straight",
+                            "cc and repeat",
+                            "FAIL", "FAIL ",
+                            "Failed library prep, removed from run",
+                            "NA")) %>% 
+  mutate(across(where(is.character), ~ na_if(., ""))) %>% 
+  mutate(across(everything(), as.numeric),
+         sequence = as.factor(case_when(
+           is.na(amplicon_mean_coverage) ~ "No",
+           amplicon_mean_coverage > 1000 & uniformity_coverage <= 75 ~ "QNS",
+           TRUE ~ "Yes")
+           )) %>% 
+  filter(!is.na(library_conc_nm),library_conc_nm <= 100,
+         (is.na(amplicon_mean_coverage) | amplicon_mean_coverage >= 1000)) %>% 
+  mutate(generated = factor(ifelse(sequence %in% c("No", "QNS"), 0, 1)),
+         uniformity_coverage = ifelse(is.na(uniformity_coverage), 0, uniformity_coverage),
+         generated = factor(generated, levels = c(0, 1), labels = c("No", "Yes"))
+  )
+
+nextseq <- data %>% 
+  mutate(group = cumsum(!is.na(cluster_density))) %>% 
+  group_by(group) %>% 
+  mutate(sample_number = row_number()) %>% 
+  fill(cluster_density, .direction = "downup") %>% 
+  ungroup()  %>% 
+  select(-group) 
+
+
+        
+```
+
+## NA Distribution Or not Sequenced data.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+na_distribution <- nextseq %>%
+  group_by(library_conc_nm) %>%
+  summarise(across(c(-sequence, -generated), ~ sum(is.na(.))))
+# head(na_distribution)
+
+counts <- nextseq %>%
+  group_by(sequence) %>%
+  mutate(
+    sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+    ) %>% 
+  summarise(count = n()) 
+```
+
+
+## Prediction of Whether sequence is generated or not based on Library concentration.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+model <- glm(generated ~ library_conc_nm, data = nextseq, family = binomial)
+summary(model)
+predicted_probs <- predict(model, type = "response")
+roc_curve <- roc(nextseq$generated, predicted_probs)
+exp(coef(model))
+plot(roc_curve)
+auc(roc_curve)
+```
+
+1) The log-odds of the sequence is generated when library concentration is 0 is 0.96779, that means model predicts a 72.46% probability of sequence generation at baseline. \n
+2) Log-Odds at library Concentration = 1 is (0.96779 + 0.28903). \n
+That means odds = 4.88, and model predict a 77.84% probability of sequence being generated at library Concentration = 1. \n
+3) Every one unit increase in the library concentration lead the probability of increase in the sequence generation by 5.39%. \n
+4) P value = 2e-16, suggesting library concentration is a significant predictor of whether sequence is generated or not. \n
+
+
+## Model to check, Is total_pf_reads Missing Values Based on library Concentration.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+model1 <- glm(generated ~ library_conc_nm + cluster_density, data = nextseq, family = binomial)
+summary(model1)
+predicted_probs <- predict(model1, type = "response")
+roc_curve <- roc(nextseq$generated, predicted_probs)
+exp(coef(model1))
+plot(roc_curve)
+auc(roc_curve)
+```
+
+
+## Count of Sequence Generation by Library concentration and Cluster Density.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+nextseq %>% 
+  filter(library_conc_nm <= 10) %>%
+  mutate(
+    sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+         ) %>% 
+  ggplot(aes(x = library_conc_nm, fill = sequence)) +
+  geom_bar(position = "stack") +
+  scale_x_continuous(minor_breaks = seq(0, 10, by = 0.5),
+                     breaks = seq(0, 10, by = 1), 
+                     labels = label_number()) + 
+  scale_fill_manual(values = c("Yes" = "#fa1e75", 
+                               "No" = "#1f77b4", 
+                               "QNS" = "#2ca02c"))  +
+  labs(title = "Sequence Generation by Library Concentration",
+       x = "Library Concentration (nM)",
+       y = "Count of Sequence Generation",
+       fill = "Sequence Generated") +
+  theme_classic() +
+  theme(axis.text.x = element_text(hjust = 1),
+        legend.position = "none")
+
+
+nextseq %>% 
+  filter(library_conc_nm <= 10 & library_conc_nm > 0) %>% 
+  mutate(
+    sequence = factor(sequence, levels = c("Yes", "No", "QNS"))
+  ) %>% 
+  group_by(library_conc_nm, sequence) %>% 
+  summarise(count = n(), .groups = 'drop') %>%
+  ggplot(aes(x = library_conc_nm, y = count, color = sequence)) +
+  geom_line(aes(group = sequence), size = 0.6, linetype = "solid") +
+  scale_color_manual(values = c("Yes" = "#fa1e75", 
+                               "No" = "#1f77b4", 
+                               "QNS" = "#2ca02c")) +
+  scale_x_continuous(breaks = seq(0, 10, by = 1)) +
+  labs(
+    title = "Sequence Generation by Library Concentration",
+    x = "Library Concentration (nM)",
+    y = "Count of Sequence Generation", 
+    fill = "Sequence Generated"
+  ) +
+  theme_classic() +
+  theme(axis.text.x = element_text(hjust = 0.5),
+        legend.position = "none")
+
+nextseq %>%
+  filter(cluster_density < 400) %>%
+  mutate(
+    sequence = factor(sequence, levels = c("Yes", "No", "QNS"))
+  ) %>%
+  group_by(cluster_density, sequence) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  ggplot(aes(x = cluster_density, y = count, color = sequence)) +
+  geom_line(aes(group = sequence), size = 0.6, linetype = "solid") + 
+  scale_x_continuous(limits = c(50, 400),
+                     minor_breaks = seq(50, 400, by = 10),
+                     breaks = seq(50, 400, by = 50)) +
+   scale_y_continuous(limits = c(0, 100),
+                      minor_breaks = seq(0, 100, by = 2),
+                      breaks = seq(0, 100, by = 10)) + 
+  scale_color_manual(values = c("Yes" = "#fa1e75", 
+                               "No" = "#1f77b4", 
+                               "QNS" = "#2ca02c")) +
+  labs(title = "Sequence Generation by Cluster Density",
+       x = "Cluster Density (K/mm²)",
+       y = "Number of Samples",
+       color = "Sequence Generated") +
+  theme_classic() +
+  theme(
+    axis.ticks.y = element_line(size = 0.1, color = "gray"),
+    axis.ticks.length = unit(0.1, "cm"), 
+    axis.ticks.major = element_line(size = 0.1, color = "gray"),
+    axis.ticks.minor = element_line(size = 0.1, color = "gray"),
+    panel.grid.minor = element_line(color = "gray", size = 0.2,),
+    panel.grid.major = element_line(color = "gray", size = 0.2), 
+    panel.background = element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 0, vjust = 0.5)
+  ) 
+
+# ggsave("E:/micobione core center uiowa analysis/project 1/fig10.tiff", width = 30, height = 10)
+
+```
+
+
+## Boxplot of Library Concentration and Cluster Dendity by Sequence
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+nextseq %>% 
+  filter(library_conc_nm <= 30) %>%
+  mutate(
+    sequence = factor(sequence, levels = c("Yes", "No", "QNS"))
+  ) %>% 
+  ggplot(aes(x = sequence, 
+           y = library_conc_nm, 
+           fill = sequence)) +
+  geom_boxplot() +
+  labs(title = "Library Concentration Distribution by Sequence Generation",
+       x = "Sequence Generation",
+       y = "Library Concentration (nM)") +
+  scale_y_continuous(minor_breaks = seq(0, 30, by = 1),
+                     breaks = seq(0, 30, by = 5), 
+                     labels = label_number()) +
+  scale_fill_manual(values = c("Yes" = "#fa1e75", 
+                               "No" = "#1f77b4", 
+                               "QNS" = "#2ca02c")) +
+  theme(
+    axis.ticks.y = element_line(size = 0.25, color = "gray"),
+    axis.ticks.length = unit(0.1, "cm"), 
+    axis.ticks.major = element_line(size = 0.25, color = "gray"),
+    axis.ticks.minor = element_line(size = 0.25, color = "gray"),
+    panel.grid.minor = element_line(color = "gray", size = 0.2),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    legend.position = "none"
+  ) +
+theme(panel.background = element_rect(fill = "white")) +
+  stat_summary(fun = median, 
+               geom = "text", 
+               aes(label = round(..y.., 2)), 
+               position = position_nudge(y = 1),
+               color = "black", size = 3) +
+geom_text(data = counts, 
+            aes(x = sequence,y = c(15, 5, 11), 
+                label = paste("n =", count)), 
+          color = "black", size = 4, fontface = "bold", vjust = -0.5)
+
+
+nextseq %>% 
+  filter(sequence %in% c("Yes", "QNS")) %>% 
+  ggplot(aes(x = amplicon_mean_coverage, 
+           y = sequence, color = sequence)) +
+  geom_point() +  
+  geom_jitter(width = 0.5, alpha = 0.2)+
+  scale_fill_manual(values = c("Yes" = "#fa1e75", "QNS" = "#2ca02c")) +
+  labs(
+    title = "Amplicon Mean Coverage by Sequence Outcome",
+    x = "Amplicon Mean Coverage",
+    y = "Sequence Outcome"
+  ) + 
+    scale_x_continuous(limits = c(0, 40000),
+      minor_breaks = seq(0, 40000, by = 2500),
+                     breaks = seq(0, 40000, by = 5000)) +
+  theme_classic()+
+  theme(
+    panel.grid.minor = element_line(color = "gray", size = 0.25),
+    axis.ticks.x = element_line(size = 0.25, color = "gray"),
+    axis.ticks.length = unit(0.2, "cm"),  # Length of the ticks
+    axis.ticks.major = element_line(size = 0.25, color = "gray"),
+    axis.ticks.minor = element_line(size = 0.25, color = "gray")
+  )
+
+nextseq %>% filter(cluster_density < 400) %>% 
+  mutate(
+    sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+         ) %>%  
+  ggplot(aes(x = sequence, 
+           y = cluster_density, 
+           fill = sequence)) +
+  geom_boxplot() +
+  labs(title = "Cluster Density Distribution by Sequence Generation",
+       x = "Sequence Generation",
+       y = "Cluster Density (K/mm2)") +
+  scale_y_continuous(minor_breaks = seq(50, 400, by = 10),
+                     breaks = seq(50, 400, by = 50), 
+                     labels = label_number()) +
+  scale_fill_manual(values = c("Yes" = "#fa1e75", 
+                               "No" = "#1f77b4", 
+                               "QNS" = "#2ca02c")) +
+  theme(
+    axis.ticks.y = element_line(size = 0.25, color = "gray"),
+    axis.ticks.length = unit(0.1, "cm"), 
+    axis.ticks.major = element_line(c),
+    axis.ticks.minor = element_line(size = 0.25, color = "gray"),
+    panel.grid.minor = element_line(color = "gray", size = 0.2),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    legend.position = "none"
+  ) +
+theme(panel.background = element_rect(fill = "white")) +
+  stat_summary(fun = median, 
+               geom = "text", 
+               aes(label = round(..y.., 2)), 
+               position = position_nudge(y = 1),
+               color = "black", size = 3) +
+geom_text(data = counts, 
+            aes(x = sequence,y = c(240, 240, 235), 
+                label = paste("n =", count)), 
+          color = "black", size = 4, fontface = "bold", vjust = -0.5)
+
+```
+
+## Density of Sequence generation by Library concentration.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+nextseq %>% 
+  filter(library_conc_nm <= 20) %>% 
+    mutate(sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+         ) %>%
+  ggplot(aes(x = library_conc_nm, fill = sequence)) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Density of Sequence Generation by Library Concentration",
+       x = "Library Concentration (nM)",
+       y = "Density",
+       fill = "Sequence Generated") + 
+  geom_text(data = counts, 
+            aes(x = c(8, 0.5, 3.5), y = c(0.08, 0.24, 0.09), 
+                label = paste("n =", count)), 
+            color = "black", size = 4, fontface = "bold", vjust = -0.5) +
+  scale_x_continuous(breaks = seq(0, 20, by = 2))+
+  theme_classic() +
+  scale_fill_manual(values = c("Yes" = "#fa1e75", "No" = "#1f77b4", "QNS" = "#2ca02c"))
+
+nextseq %>% 
+  filter(cluster_density < 400) %>% 
+    mutate(sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+         ) %>%
+  ggplot(aes(x = cluster_density, fill = sequence)) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Density of Sequence Generation by Cluster Density",
+       x = "Cluster Density",
+       y = "Density",
+       fill = "Sequence Generated") + 
+  geom_text(data = counts,
+            aes(x = c(235, 170, 140), y = c(0.0085, 0.0095, 0.0065),
+                label = paste("n =", count)),
+            color = "black", size = 4, fontface = "bold", vjust = -0.5) +
+  scale_x_continuous(breaks = seq(50, 400, by = 50))+
+  theme_classic() +
+  scale_fill_manual(values = c("Yes" = "#fa1e75", "No" = "#1f77b4", "QNS" = "#2ca02c"))
+```
+
+# count of sequence between cluster density between 150 to 230 (K/mm2).
+```{r}
+nextseq %>% 
+  filter(cluster_density >= 150 & cluster_density<= 230) %>%
+  group_by(sequence) %>%
+  mutate(
+    sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+    ) %>% 
+  summarise(count = n()) %>% 
+  gt() %>% 
+    tab_header(
+    title = "count of sequence between cluster density between 150 to 230 (K/mm2)"
+  ) 
+```
+
+# count of sequence between Library concentration between 2 to 5 (nm).
+```{r, echo=FALSE}
+nextseq %>% 
+  filter(library_conc_nm >= 2 & library_conc_nm <= 5) %>%
+  group_by(sequence) %>%
+  mutate(
+    sequence = factor(sequence, 
+                           levels = c("Yes", "No", "QNS"))
+    ) %>% 
+  summarise(count = n()) %>% 
+  gt() %>% 
+    tab_header(
+    title = "Count of Sequence between Library Concentration 2 to 5 (nm)"
+  ) 
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+nextseq %>%
+  select(library_conc_nm, total_pf_reads, amplicon_mean_coverage, sequence) %>% 
+  head() %>%
+  gt() %>%
+  cols_label(
+    library_conc_nm = "Library Concentration",
+    total_pf_reads = "Total PF Reads",
+    amplicon_mean_coverage = "Amplicon Mean Coverage",
+    sequence = "Sequence Generated"
+  ) %>%
+  tab_header(
+    title = md("**NextSeq Data Summary**"),
+    subtitle = md("*Showing the first few rows*")
+  ) %>% 
+  tab_spanner(
+    label = "Library Information",
+    columns = c(library_conc_nm)
+  ) %>%
+  tab_spanner(
+    label = "Reads and Coverage",
+    columns = c(total_pf_reads, amplicon_mean_coverage)
+  ) %>%
+  tab_spanner(
+    label = "Sequence Information",
+    columns = c(sequence)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold", color = "darkblue"),
+    locations = cells_title()
+  ) %>%
+ tab_style(
+    style = cell_text(color = "#25dc00"),
+    locations = cells_body(rows = sequence == "Yes", columns = sequence)
+  ) %>%
+  tab_style(
+    style = cell_text(color = "#ff5d12"),
+    locations = cells_body(rows = sequence == "No", columns = sequence)
+  )
+```
+
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+## Prediction Model for the probability of sequence generation based on library concentration of previous model.
+# $\text{log-odds} = \beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density}$ <br>
+# $\text{Probability} = 1/(1 + e^{-\text{log-odds}})$ <br>
+# $\text{Probability} = 1/(1 + e^{-(\beta_0 + \beta_1 \times \text{library concentration} + \beta_2 \times \text{cluster density})})$ <br>
+
+set.seed(9999)
+
+model <- glm(generated ~ library_conc_nm + cluster_density, data = nextseq, family = binomial)
+
+prediction_sequence_generation <- function(library_conc_nm, cluster_density, model) {
+  intercept <- model$coefficients[1]
+  coef_library_conc <- model$coefficients[2]
+  coef_cluster_density <- model$coefficients[3]
+  
+  log_odds <- intercept + coef_library_conc * library_conc_nm + coef_cluster_density * cluster_density
+  
+  probability <- 1 / (1 + exp(-log_odds))
+  
+  return(probability)
+}
+
+library_conc_values <- runif(1000, min = 0, max = 30) 
+uniformity_coverage_values <- runif(100, min = 0, max = 100) 
+
+predicted_probabilities <- mapply(prediction_sequence_generation, 
+                                  library_conc_values, 
+                                  uniformity_coverage_values, 
+                                  MoreArgs = list(model = model))
+
+predicted_data <- data.frame(library_concentration = library_conc_values,
+                             uniformity_coverage = uniformity_coverage_values,
+                             predicted_probability = round(predicted_probabilities, 2))
+
+threshold <- 0.95
+
+predicted_data$sequence <- ifelse(predicted_data$predicted_probability > threshold, "Yes", "No")
+
+head(predicted_data)
+
+
+x<- nextseq$library_conc_nm
+y <- nextseq$cluster_density
+
+predicted_probabilities <- prediction_sequence_generation(x, y, model)
+
+predicted_data  <- data.frame(library_conc_nm = x, 
+                              cluster_density = y, 
+                              generated = nextseq$generated,
+                              predicted_probability = round(predicted_probabilities, 4))
+
+threshold <- 0.90
+
+predicted_data$sequence <- ifelse(
+  predicted_data$predicted_probability > threshold, "Yes", "No")
+```
+
+
+```{r echo=FALSE, include=FALSE}
+predicted_data %>%
+  head() %>%
+  gt() %>%
+  cols_label(
+    library_conc_nm = "Library Concentration",
+    predicted_probability = "Predicted Probability",
+    sequence = "Sequence Generated"
+  ) %>%
+  tab_header(
+    title = md("**Predicted of Sequence Generation Summary**"),
+    subtitle = md("*Showing the first few rows of predicted data*")
+  ) %>%
+  tab_spanner(
+    label = "Prediction Information",
+    columns = c(library_conc_nm, predicted_probability)
+  ) %>%
+  tab_spanner(
+    label = "Sequence Information",
+    columns = c(sequence)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold", color = "darkblue"),
+    locations = cells_title()
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "normal", color ="black"),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+ tab_style(
+    style = cell_text(align = "center", color = "#25dc00"),
+    locations = cells_body(rows = sequence == "Yes", columns = sequence)
+  ) %>%
+  tab_style(
+    style = cell_text(align = "center", color = "#ff5d12"),
+    locations = cells_body(rows = sequence == "No", columns = sequence)
+  )
+```
+
+
+## Prediction Model for the probability of sequence generation based on library concentration and Cluster Density using Random Forest model.
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(caret)
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 10, 
+                              classProbs = TRUE, 
+                              summaryFunction = twoClassSummary)
+rf_model <- train(generated ~ library_conc_nm + cluster_density, 
+                  data = nextseq,
+                  method = "rf",
+                  trControl = train_control,
+                  metric = "ROC")
+
+
+x <- nextseq$library_conc_nm
+y <- nextseq$cluster_density
+
+predict_sequence_generation <- function(library_conc, 
+                                        cluster_density, 
+                                        rf_model) {
+  prob <- predict(rf_model, newdata = nextseq, type = "prob")$Yes
+  return(prob)
+}
+
+predicted_probs <- predict_sequence_generation(x, y, rf_model)
+predicted_data <- data.frame(library_conc_nm = x,
+                             cluster_density = y,
+                             predicted_probability = predicted_probs,
+           generate = nextseq$sequence)
+
+threshold <- 0.90
+
+predicted_data$predicted <- ifelse(
+  predicted_data$predicted_probability >= threshold, "Yes", "No")
+# predicted_data %>% filter(!generate == "Yes" & predicted_probability >= 0.90)
+```
+
+
+## Prediction and sequence generation summary
+```{r, echo=FALSE, include=FALSE}
+predicted_data %>%
+  filter(!generate == "Yes") %>%
+  gt() %>%
+  cols_label(
+    library_conc_nm = "Library Concentration",
+    predicted_probability = "Predicted Probability",
+    predicted = "Predicted"
+  ) %>%
+  tab_header(
+    title = md("**Predicted of Sequence Generation Summary**"),
+    subtitle = md("*Showing the first few rows of predicted data*")
+  ) %>%
+  tab_spanner(
+    label = "Prediction Information",
+    columns = c(library_conc_nm, predicted_probability)
+  ) %>%
+  tab_spanner(
+    label = "Sequence Information",
+    columns = c(predicted)
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold", color = "darkblue"),
+    locations = cells_title()
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "normal", color ="black"),
+    locations = cells_column_labels(columns = everything())
+  ) %>%
+ tab_style(
+    style = cell_text(align = "center", color = "#25dc00"),
+    locations = cells_body(rows = predicted == "Yes", columns = predicted)
+  ) %>%
+  tab_style(
+    style = cell_text(align = "center", color = "#ff5d12"),
+    locations = cells_body(rows = predicted == "No", columns = predicted)
+  )
+```
+
+
+
