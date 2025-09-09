@@ -1,0 +1,357 @@
+---
+title: "CAUTI Updated"
+author: "Prashant Kumar"
+format: docx
+editor: source
+---
+
+```{r message=FALSE, warning=FALSE}
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(survival)
+library(gt)
+library(survminer)
+```
+
+```{r echo=FALSE}
+cauti <- read_excel("E:/dataset/Cauti Study data 4-2024.xlsx")
+```
+
+```{r include=FALSE, message=FALSE}
+ID <- cauti %>% 
+  distinct(PAT_MRN_ID) %>%
+  mutate(ID = row_number())
+new_cauti <- cauti %>%
+  left_join(ID, by = "PAT_MRN_ID") %>% 
+  select(-"PAT_MRN_ID") %>% 
+  select(ID, everything())
+```
+
+
+```{r}
+## cleaning unexpected removal and placement date and checking the data set.
+cauti1 <- new_cauti %>% 
+  filter(!PAT_AGE <= 17) %>% 
+  filter(Gender!= "Unknown", !is.na(ID)) %>% 
+  select(-ORDER_FOR_FOLEY) %>% 
+  filter(!(PLACEMENT_DATE <= HOSP_ADMSN_TIME - days(3))) %>% 
+   mutate(
+    REMOVAL_DATE = ifelse(
+      REMOVAL_DATE > HOSP_DISCH_TIME | REMOVAL_DATE < PLACEMENT_DATE, 
+                          HOSP_DISCH_TIME, 
+                          REMOVAL_DATE), 
+    PLACEMENT_DATE = ifelse(
+      PLACEMENT_DATE < HOSP_ADMSN_TIME | PLACEMENT_DATE > HOSP_DISCH_TIME,
+                            HOSP_ADMSN_TIME, PLACEMENT_DATE)
+    ) %>% 
+    mutate(
+    REMOVAL_DATE = as.POSIXct(REMOVAL_DATE, format = "%m/%d/%Y %H:%M"),
+    PLACEMENT_DATE = as.POSIXct(PLACEMENT_DATE, format = "%m/%d/%Y %H:%M"),
+    HOSP_ADMSN_TIME = as.POSIXct(HOSP_ADMSN_TIME, format = "%m/%d/%Y %H:%M"),
+    HOSP_DISCH_TIME = as.POSIXct(HOSP_DISCH_TIME, format = "%m/%d/%Y %H:%M")
+  ) 
+# %>%
+#   filter(PLACEMENT_DATE < HOSP_ADMSN_TIME | PLACEMENT_DATE > HOSP_DISCH_TIME) %>%
+#   filter(REMOVAL_DATE > HOSP_DISCH_TIME | REMOVAL_DATE > HOSP_ADMSN_TIME)
+
+
+
+cauti2 <- cauti1 %>% mutate(
+   Gender = if_else(Gender == "Male", 0, 1),
+   DIABETES_ON_PROBLEM_LIST = if_else(
+     DIABETES_ON_PROBLEM_LIST == "Y", 1, 0),
+   RENAL_INSUFFICIENY_ON_PROBLEM_LIST = if_else(
+     RENAL_INSUFFICIENY_ON_PROBLEM_LIST == "Y", 1, 0),
+   Bowel_Incontinence = if_else(
+     Bowel_Incontinence == "Y", 1, 0),
+   Urinary_Incontinence = if_else(
+     Urinary_Incontinence == "Y", 1, 0),
+   # ORDER_FOR_FOLEY = if_else(
+   #   ORDER_FOR_FOLEY == "Y", 1, 0),
+   CAUTI_LDA = if_else(
+     CAUTI_LDA == "Y", 1, 0),
+   CAUTI_Date = as.Date(CAUTI_Infection_date, format = "%m/%d/%Y"),
+   admissionday = round(as.numeric(
+     difftime(HOSP_DISCH_TIME, HOSP_ADMSN_TIME, units = "days")) + 1),
+   CHG = round((CHG_NUMERATOR / CHG_DENOMINATOR) * 100),
+   chg_100 = ifelse(CHG >= 100, 100, CHG),
+   meatal = round((Meatal_Numerator/Meatal_Denominator)* 100),
+   meatal_100 = ifelse(meatal >= 100, 100, meatal)) %>%
+  mutate(
+    BMI_30 = ifelse(PAT_BMI < 30, 0, 1),
+    BMI_cat = cut(PAT_BMI, breaks = c(-Inf, 18.5, 25, 30, Inf), 
+                  labels = c('underweight', 
+                             'healthy weight', 
+                             'overweight', 
+                             'obese'))) %>% 
+  mutate(
+    Age_50 = ifelse(PAT_AGE < 50, 0, 1),
+    Age_Cat = cut(PAT_AGE, breaks = c(-Inf, 50, 60, 70, 80, Inf), 
+                  labels = c('<50', 
+                             '50-59', 
+                             '60-69', 
+                             '70-79', 
+                             '>=80'))) %>% 
+  mutate(
+    CHG_Cat = cut(CHG, breaks = c(0, 49, 79, 100), 
+                  labels = c('0-49', '50-79', '80-100'))) %>% 
+  mutate(
+    Meatal_Cat = cut(meatal, breaks = c(0, 49, 79, 100), 
+                     labels = c('0-49', '50-79', '80-100'))) %>% 
+  filter(!(CAUTI_LDA == 1 & PLACEMENT_DATE > CAUTI_Date)) %>% 
+  select(-IP_LDA_ID, -Foley_Placement_unit, -LINE_DESCRIPTION , -LINE_TYPE) %>% 
+  mutate(CAUTI_LDA2 = ifelse(ConsecutiveFoley == "N", "0", CAUTI_LDA)) %>% 
+  mutate(
+    foleyday = round(as.numeric(
+     difftime(REMOVAL_DATE, PLACEMENT_DATE, units = "days")) + 1
+  )) 
+```
+
+
+
+```{r echo=FALSE}
+combine_rows <- function(df) {
+  combined <- data.frame()
+  i <- 1
+  while (i <= nrow(df)) {
+    current_row <- df[i, ]
+    
+    if (i < nrow(df)) {
+      next_row <- df[i + 1, ]
+      
+      if (next_row$PLACEMENT_DATE - current_row$REMOVAL_DATE <= days(1)) {
+        combined_row <- current_row
+        combined_row$REMOVAL_DATE <- next_row$REMOVAL_DATE
+        combined <- rbind(combined, combined_row)
+        i <- i + 2
+      } else {
+        combined <- rbind(combined, current_row)
+        i <- i + 1
+      }
+    } else {
+      combined <- rbind(combined, current_row)
+      i <- i + 1
+    }
+  }
+  return(combined)
+}
+
+cleaned <- cauti2 %>%
+  group_by(ID) %>%
+  do(combine_rows(.))
+```
+
+```{r echo=FALSE}
+cauti3 <- cleaned %>% 
+    mutate(
+    r_date = lag(REMOVAL_DATE),
+    .after = REMOVAL_DATE
+  ) %>% 
+  arrange(ID, HOSP_ADMSN_TIME) %>%
+  group_by(ID, HOSP_ADMSN_TIME) %>%
+  mutate(num_foleys = cumsum(!duplicated(PLACEMENT_DATE)), 
+         foley_gap = ifelse(
+           row_number() == 1, 0, 
+           as.numeric(difftime(PLACEMENT_DATE, r_date, units = "days"))), 
+         consec_foley = cumsum(
+           ifelse(row_number() == 1, 1, 
+                  ifelse(foley_gap > 1, 1, 0))), 
+         foley_gap = round(foley_gap)) %>% 
+  mutate(consec_foley = ifelse(CAUTI_LDA == 1, 0, consec_foley)) %>% 
+  mutate(
+    duration_of_hospitalization = round(as.numeric(
+      difftime(HOSP_DISCH_TIME, 
+               HOSP_ADMSN_TIME, 
+               units = "days")))) %>% 
+  filter(!foleyday >= 50) %>% 
+  ungroup()
+```
+
+
+```{r echo=FALSE}
+# cauti_freq <- cauti3 %>%
+#   count(CAUTI_LDA) %>%
+#   mutate(percentage = n / sum(n) * 100) %>%
+#   arrange(desc(n))
+```
+
+
+```{r echo=FALSE}
+cauti4 <- cauti3 %>% 
+  mutate(Bowel_Incontinence = as.numeric(Bowel_Incontinence),
+         Urinary_Incontinence = as.numeric(Urinary_Incontinence)) %>% 
+    mutate_at(
+      vars(Bowel_Incontinence, 
+           Urinary_Incontinence), ~replace(., is.na(.), 0)) %>% 
+  mutate(Gender = as.factor(Gender))
+```
+
+
+
+```{r}
+model <- glm(
+  CAUTI_LDA ~ PAT_AGE + Gender + PAT_BMI + DIABETES_ON_PROBLEM_LIST + 
+    RENAL_INSUFFICIENY_ON_PROBLEM_LIST + Bowel_Incontinence + 
+    Urinary_Incontinence + Num_Foley_Urine_Culture_Collected + 
+    duration_of_hospitalization + num_foleys+ foleyday+ meatal_100 + chg_100,
+  data = cauti4,
+  family = binomial
+)
+summary(model)
+```
+
+
+```{r}
+km_fit <- survfit(Surv(foleyday, CAUTI_LDA) ~ 1, data = cauti4)
+
+plot(km_fit, 
+     conf.int=T, 
+     mark="|", 
+     ylab= "Survival Probability", 
+     xlab= "Days",
+     cex.axis=1,
+     main = "Kaplan-Meier Survival Curve for Foley Days", 
+     cex.main = 1)
+
+```
+
+
+```{r echo=FALSE}
+ID2 <- cauti %>% 
+  select(PAT_MRN_ID, Gender) %>% 
+  distinct(PAT_MRN_ID, Gender) %>% 
+  mutate(ID = row_number())
+
+summary_table <- new_cauti %>%
+  summarize(
+    `Total Number of Patients` = as.character(n_distinct(ID)),
+    `Mean Age` = as.character(round(mean(PAT_AGE, na.rm = TRUE), 1)), 
+    `Male Patients` = as.character(sum(ID2$Gender == "Male", na.rm = TRUE)),
+    `Female Patients` = as.character(sum(ID2$Gender == "Female", na.rm = TRUE)),
+    `Mean BMI` = as.character(round(mean(PAT_BMI, na.rm = TRUE), 1)), 
+    `Renal Insufficiency (Yes/No)` = paste(
+      sum(RENAL_INSUFFICIENY_ON_PROBLEM_LIST == "Y", na.rm = TRUE), 
+      "/", sum(RENAL_INSUFFICIENY_ON_PROBLEM_LIST == "N", na.rm = TRUE)),
+    `Diabetes (Yes/No)` = paste(
+      sum(DIABETES_ON_PROBLEM_LIST == "Y", na.rm = TRUE), 
+      "/", sum(DIABETES_ON_PROBLEM_LIST == "N", na.rm = TRUE)),
+    `CAUTI (Yes/No)` = paste(sum(CAUTI_LDA == "Y", na.rm = TRUE), 
+                             "/", sum(CAUTI_LDA == "N", na.rm = TRUE))
+  ) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Variable", 
+               values_to = "Description")
+
+
+
+gt(summary_table) %>%
+  tab_header(
+    title = "Description Table of Study Population"
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightblue"),
+      cell_text(weight = "bold")
+    ),
+    locations = cells_title(groups = "title")
+  ) %>% 
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(columns = c(Variable, Description))
+  )
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+km_fit_gender <- survfit(Surv(foleyday, CAUTI_LDA) ~ Gender, data = cauti4)
+
+ggsurvplot(
+  km_fit_gender, 
+  data = cauti4, 
+  pval = TRUE, 
+  conf.int = TRUE,
+  risk.table = TRUE,
+  ggtheme = theme_minimal(),
+  title = "Kaplan-Meier Survival Curves for Foley Days by Gender",
+  xlab = "Days",
+  ylab = "Survival Probability",
+  legend.labs = c("Male", "Female")
+)
+```
+
+```{r echo=FALSE}
+library(ggplot2)
+
+ggplot(cauti4, aes(x = factor(CAUTI_LDA), y = PAT_AGE, fill = factor(CAUTI_LDA))) +
+  geom_boxplot() +
+  labs(x = "CAUTI", y = "Age", fill = "CAUTI", 
+       title = "Age Distribution by CAUTI Status") +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  theme_minimal()
+
+ggplot(cauti4, aes(x = factor(CAUTI_LDA), y = PAT_AGE, fill = factor(CAUTI_LDA))) +
+  geom_boxplot() +
+  labs(x = "CAUTI", y = "Age", fill = "CAUTI", 
+       title = "Age Distribution by CAUTI Status") +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  theme_minimal() + 
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("No CAUTI", "CAUTI")) + 
+  facet_wrap(~ Gender, labeller = as_labeller(c("0" = "Male", "1" = "Female")))
+
+```
+
+
+```{r}
+ggplot(cauti4, aes(x = factor(CAUTI_LDA), y = chg_100, fill = factor(CAUTI_LDA))) +
+  geom_boxplot() +
+  labs(x = "CAUTI", y = "Age", fill = "CAUTI", 
+       title = "Age Distribution by CAUTI Status") +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  theme_minimal()
+
+ggplot(cauti4, aes(x = CHG_Cat, fill = factor(CAUTI_LDA))) +
+  geom_bar(position = "dodge") +
+  labs(x = "CHG Categories", y = "Count", fill = "CAUTI",
+       title = "Distribution of CAUTI by CHG Categories") +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("No CAUTI", "CAUTI")) +
+  theme_minimal()
+
+ggplot(cauti4, aes(x = factor(CAUTI_LDA), y = chg_100, fill = factor(CAUTI_LDA))) +
+  geom_boxplot() +
+  labs(x = "CAUTI", y = "CHG", fill = "CAUTI",
+       title = "CHG Distribution by CAUTI Status") +
+  scale_x_discrete(labels = c("No CAUTI", "CAUTI")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("No CAUTI", "CAUTI")) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(cauti4, aes(x = Meatal_Cat, fill = factor(CAUTI_LDA))) +
+  geom_bar(position = "dodge") +
+  labs(x = "CHG Categories", y = "Count", fill = "CAUTI",
+       title = "Distribution of CAUTI by CHG Categories") +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("No CAUTI", "CAUTI")) +
+  theme_minimal()
+ggplot(cauti4, aes(x = factor(CAUTI_LDA), y = meatal_100, fill = factor(CAUTI_LDA))) +
+  geom_boxplot() +
+  labs(x = "CAUTI", y = "meatal", fill = "CAUTI",
+       title = "CHG Distribution by CAUTI Status") +
+  scale_x_discrete(labels = c("No CAUTI", "CAUTI")) +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "tomato"),
+                    labels = c("No CAUTI", "CAUTI")) +
+  theme_minimal()
+```
+
+```{r}
+cauti4 %>% filter(CAUTI_LDA == 1)
+```
+
+
+
+
