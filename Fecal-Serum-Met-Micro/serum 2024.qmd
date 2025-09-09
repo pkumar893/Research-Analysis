@@ -1,5 +1,5 @@
 ---
-title: "TAC Analysis Serum 2024"
+title: "serum 2024 Analysis"
 author: "Prashant Kumar"
 format: 
   html:
@@ -33,16 +33,14 @@ library(clusterProfiler)
 library(tibble)
 library(corrplot)
 library(ggforce)
+library(ggrepel)
+library(knitr)
 ```
 
 
-```{r echo=FALSE}
-# dir.exists("E:/Ajit data analysis/Tac/serum 2024")
-# getwd()
-# setwd("E:\\Ajit data analysis\\Tac\\serum 2024") 
-# setwd("`")
-
-serum2024 <- read_excel("serum metablomics 2024.xlsx")
+## Data cleaning
+```{r message=FALSE, warning=FALSE}
+serum2024 <- read_excel("~\\serum 2024\\serum metablomics 2024.xlsx")
 
 metabolites <- colnames(serum2024)[-1]
 
@@ -56,7 +54,6 @@ clean_names <- gsub("^[0-9]+_|_[0-9]+_|_[0-9]+$|[0-9]+_", "", clean_names)
 
 colnames(serum2024)[-1] <- clean_names
 
-
 metabolites <- colnames(serum2024)[-c(1, 2)]
 clean_names <- gsub("[() ]", "_", metabolites)
 colnames(serum2024)[-c(1, 2)] <- clean_names
@@ -69,40 +66,69 @@ serum2024 <- serum2024 %>%
   mutate(
     Group = case_when(
       grepl("WT-Sham", Sample) ~ "Sham",
-      grepl("WT-TAC-V", Sample) ~ "TAC_V",
+      grepl("WT-TAC-Tryptophan", Sample) ~ "TAC Tryptophan",
+      grepl("WT-TAC-Tryptamine \\(IP\\)", Sample) ~ "TAC Tryptamine (IP)",
+      grepl("WT-TAC-Tryptamine \\(Oral\\)", Sample) ~ "TAC-Tryptamine (Oral)",
       grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
       TRUE ~ "Other"
     ), .after = "Sample"
   ) %>% 
   mutate(Group = as.factor(Group))
 
-table(serum2024$Group)
-
+# table(serum2024$Group)
 
 sample_info <- serum2024 %>% select(Sample, Group) %>% mutate(Group = as.factor(Group))
 metabolite_serum2024 <- serum2024 %>% select(-Group)
 
-
-# rownames(metabolite_serum2024) <- metabolite_serum2024$Sample
-# metabolite_serum2024 <- metabolite_serum2024 %>% select(-Sample)
-
 metabolite_serum2024 <- metabolite_serum2024 %>% column_to_rownames("Sample")
 
 # Transpose to have metabolites as rows
-metabolite_serum2024_t <- t(metabolite_serum2024)
-# colnames(metabolite_serum2024_t) <- rownames(metabolite_serum2024)
-# rownames(metabolite_serum2024_t) <- colnames(metabolite_serum2024)
-
+# metabolite_serum2024_t <- t(metabolite_serum2024)
 ```
 
+## Mice info and Combine info.
+```{r message=FALSE, warning=FALSE}
+mice_info <- read_excel("~/Tac ready to use.xlsx", 
+                        sheet = 6, 
+                        range = "A64:N97",
+                        col_names = TRUE) %>% 
+  select(-S.No, -Gender)
 
-## Multivariate Analysis
-# Partial Least Squares Discriminant Analysis (plsda)
-```{r}
-scaled_serum2024 <- scale(metabolite_serum2024)
-pca_result <- prcomp(scaled_serum2024, scale. = TRUE)
+colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
+  
+integrated_data <- serum2024 %>%
+  left_join(mice_info, by = "Sample") %>% 
+  select(-Purpose, -`Peak LS`, -`EF (%)`) %>% 
+  rename(
+    LV_Thickness = `LV Thickness (mm)`,
+    LVW_mg = `LVW (mg)`,
+    LVW_TL = `LVW/TL (mg/mm)`,
+    HW_TL = `HW/TL (mg/mm)`,
+    FS = `FS%`,
+    HW_mg = `HW (mg)`,
+    GLS = `GLS (%)`
+  ) %>% 
+  relocate(HW_mg, .after = Sample)
+head(integrated_data, 2)
+```
+
+* Heart weight and associated cardiac phenotypes were merged with metabolomic profiles by mouse ID. Variable renaming standardizes clinical traits for consistency.
+
+## Overall Predictors
+```{r message=FALSE, warning=FALSE}
+predictors <- setdiff(colnames(integrated_data), 
+                      c("Sample", "Group", "LV_Thickness", 
+                        "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
+head(predictors, 10)
+```
+
+* Non-cardiac, non-group variables were selected as predictors for model fitting. These correspond to fecal metabolite concentrations.
+
+## PCA with group distribution
+```{r message=FALSE, warning=FALSE}
+scaled_Serum2024 <- scale(metabolite_serum2024)
+pca_result <- prcomp(scaled_Serum2024, scale. = TRUE)
 pca_summary <- summary(pca_result)
-
 
 scores_df <- data.frame(
   PC1   = pca_result$x[, 1],
@@ -110,37 +136,39 @@ scores_df <- data.frame(
   Group = factor(sample_info$Group, levels = unique(sample_info$Group))
 )
 
-
-# 2) get the convex-hull points for each group
+# 2)convex-hull points for each group
 hulls <- scores_df %>%
   group_by(Group) %>%
   slice(chull(PC1, PC2)) %>%
   ungroup()
 
-# 3) plot points + smooth “curvy” hull lines
+# 3) points + smooth “curvy” hull lines
 pca_plot <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
   geom_point(size = 2, alpha = 0.5) +
-  
-  # B-spline closed hull
+
   geom_bspline_closed(
     data   = hulls,
-    aes(x = PC1, y = PC2, group = Group, color = Group),
-    n      = 70,       # more knots → smoother curve
-    size   = 0.4,      # line thickness
-    alpha  = 0.2,      # transparency of line
-    fill   = NA        # no fill
+    aes(x = PC1, y = PC2, group = Group, fill = Group, color = Group),
+    n      = 70,
+    size   = 0.8,
+    alpha  = 0.2 
   ) +
-  
+
   scale_color_manual(
-    values = brewer.pal(n = length(unique(scores_df$Group)), name = "Set1")
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC-Tryptamine (Oral)" = "#2ca02c", 
+               "TAC Tryptamine (IP)" = "red","TAC Tryptophan" = "#9467bd")
   ) +
-  
+  scale_fill_manual(
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC-Tryptamine (Oral)" = "#2ca02c", 
+               "TAC Tryptamine (IP)" = "red","TAC Tryptophan" = "#9467bd")
+  ) +
+
   labs(
-    title = "PCA of Metabolite Profiles",
+    title = "PCA of Serum metabolite Profiles",
     x     = "PC1",
     y     = "PC2"
   ) +
-  
+
   theme_minimal() +
   theme(
     panel.background = element_rect(fill = "white"),
@@ -150,312 +178,46 @@ pca_plot <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
     legend.position  = "top"
   )
 
-print(pca_plot)
-
-
-# # PCA visualization
-# pca_plot <- fviz_pca_ind(pca_result,
-#                          geom = "point",
-#                          habillage = sample_info$Group,
-#                          palette = brewer.pal(length(unique(sample_info$Group)), "Set1"),
-#                          addEllipses = TRUE,
-#                          ellipse.level = 0.95) +
-#   labs(title = "PCA of Metabolite Profiles") +
-#   theme_minimal() + 
-#   theme(
-#     panel.background = element_rect(fill = "white"), 
-#     plot.background = element_rect(fill = "white"),  
-#     panel.grid.major = element_line(color = "gray", size = 0.5), 
-#     panel.grid.minor = element_line(color = "gray", size = 0.25)  
-#   )
-# # ggsave("E:/Ajit data analysis/Tac/fecal set1/pca_plot.png",
-# #          width = 20, height = 15)
-# pca_plot
-
-# PLS-DA
-plsda_result <- opls(scaled_serum2024, 
-                    as.factor(sample_info$Group),
-                    predI = 2,
-                    orthoI = 0)
-
-# png("E:/Ajit data analysis/Tac/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
-# plot(plsda_result)
-# 
-# dev.off()
-
-# Extract PLS-DA scores for plotting
-plsda_scores <- getScoreMN(plsda_result)
-plsda_serum2024 <- as.data.frame(plsda_scores) %>%
-  mutate(Group = sample_info$Group,
-         Sample = sample_info$Sample)
-
-# Plot PLS-DA
-plsda_plot <- ggplot(plsda_serum2024, aes(x = p1, y = p2, color = Group)) +
-  geom_point(size = 2, alpha = 0.8) +
-  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +
-  stat_ellipse(level = 0.9) +
-  labs(
-    title = "PLS-DA of Metabolite Profiles",
-    x = "Component 1",
-    y = "Component 2"
-  ) +
-  theme_minimal() + 
-    theme(
-    panel.background = element_rect(fill = "white"), 
-    plot.background = element_rect(fill = "white"),  
-    panel.grid.major = element_line(color = "gray", size = 0.5), 
-    panel.grid.minor = element_line(color = "gray", size = 0.25)  
-  ) +
-  scale_color_brewer(palette = "Set1")
-plsda_plot
-
-# ggsave("E:/Ajit data analysis/Tac/fecal set1/plsda_plot.png", width = 20, height = 15)
-
+pca_plot
+# ggsave("~/new analysis/serum 2022/PCA_serum_2024.png",
+#        plot = pca_plot, width = 10, height = 8, dpi = 800)
 ```
 
-## Diversity analysis
-$\alpha\ \text{and}\ \beta$ diversity analysis
-```{r}
-library(vegan)
+* Group Separation:
+  * Sham and TAC are clearly separated, suggesting that TAC changes metabolite profiles.
+  * TAC Tryptophan is somewhat between TAC and Sham, indicating partial restoration of metabolic profile by tryptophan treatment.
+  * TAC-Tryptamine (IP) and TAC-Tryptamine (Oral) are also separated and closer to Sham than TAC, which implies both routes of tryptamine may modulate metabolic changes.
 
-alpha_df <- data.frame(
-  Sample  = rownames(metabolite_serum2024),
-  Shannon = diversity(metabolite_serum2024, index = "shannon"),
-  Simpson = diversity(metabolite_serum2024, index = "simpson"),
-  Group   = sample_info$Group
-)
-
-# Boxplots of Shannon by group
-ggplot(alpha_df, aes(Group, Shannon, fill = Group)) +
-  geom_boxplot() +
-  geom_jitter(width = 0.2, alpha = 0.5) +
-  labs(title = "α-Diversity (Shannon) by Group") +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-
-# 2) β-diversity: Bray–Curtis + PCoA
-bc_dist <- vegdist(metabolite_serum2024, method = "bray")
-
-
-# PCoA ordination
-pcoa    <- cmdscale(bc_dist, eig = TRUE, k = 2)
-beta_df <- data.frame(
-  PC1   = pcoa$points[,1],
-  PC2   = pcoa$points[,2],
-  Group = sample_info$Group
-)
-
-# hulls for β-ordination
-hulls_b <- beta_df %>%
-  group_by(Group) %>%
-  slice(chull(PC1, PC2)) %>%
-  ungroup()
-
-# Plot PCoA with curvy hulls
-ggplot(beta_df, aes(PC1, PC2, color = Group)) +
-  geom_point(size = 2, alpha = 0.5) +
-  geom_bspline_closed(
-    data  = hulls_b,
-    aes(x = PC1, y = PC2, group = Group, color = Group),
-    n     = 60,
-    size  = 0.4,
-    alpha = 0.2,
-    fill  = NA
-  ) +
-  scale_color_manual(values = brewer.pal(n = length(unique(beta_df$Group)), "Set1")) +
-  labs(
-    title = "β-Diversity (Bray–Curtis PCoA)",
-    x     = "PCoA1",
-    y     = "PCoA2"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "top")
-```
-
-## Another way
-```{r include=FALSE}
-library(phyloseq)
-
-abund_table <- as.matrix(metabolite_serum2024)
-
-sample_df <- sample_info %>%
-  column_to_rownames("Sample")
-
-
-sd <- sample_data(sample_df)
-
-# Creating an OTU table object (taxa_are_rows = FALSE since metabolites = columns)
-otu <- otu_table(abund_table, taxa_are_rows = FALSE)
-
-# Combining into a phyloseq object
-ps <- phyloseq(otu, sd)
-
-ps
-
-
-
-# α-diversity
-alpha_plot <- plot_richness(
-  ps,
-  x       = "Group",
-  measures= c("Shannon", "Simpson")
-) + 
-  geom_boxplot(aes(fill = Group), alpha = 0.5, outlier.shape = NA) +
-  geom_jitter(aes(color = Group), width = 0.2) +
-  theme_minimal() +
-  theme(legend.position = "none") +
-  labs(title = "α-Diversity by Group")
-
-# β-diversity ordination
-ordu       <- ordinate(ps, method = "PCoA", distance = "bray")
-beta_plot  <- plot_ordination(ps, ordu, color = "Group") +
-  geom_point(size = 2, alpha = 0.5) +
-  stat_ellipse(level = 0.95, type = "t", linetype = 2) +
-  theme_minimal() +
-  labs(
-    title = "β-Diversity (Bray–Curtis PCoA)",
-    x     = "PCoA1",
-    y     = "PCoA2"
-  ) +
-  scale_color_manual(values = brewer.pal(n = length(unique(sample_data(ps)$Group)), "Set1")) +
-  theme(legend.position = "top")
-
-# Print them
-print(alpha_plot)
-print(beta_plot)
-
-```
-
-## Mice info
-```{r}
-mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
-                        sheet = 6, 
-                        range = "A64:N97",
-                        col_names = TRUE)
-
-colnames(mice_info)[colnames(mice_info) == "Group"] <- "Sample"
-  
-integrated_data <- serum2024 %>%
-  left_join(mice_info, by = "Sample") %>% 
-  select(-S.No, -Gender, -Purpose, -`Peak LS`, -`EF (%)`) %>% 
-  rename(
-    LV_Thickness = `LV Thickness (mm)`,
-    LVW_mg = `LVW (mg)`,
-    LVW_TL = `LVW/TL (mg/mm)`,
-    HW_TL = `HW/TL (mg/mm)`,
-    FS = `FS%`,
-    HW_mg = `HW (mg)`,
-    GLS = `GLS (%)`
-  )
-
-colnames(integrated_data)
-```
-
-
-## Pair-wise test (relation between Heart wt. and metabolite)
-```{r}
-# c("Sample", "Group", "LV_Thickness", "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg")
-
-ggpairs(integrated_data[, c("HW_mg", 
-                            setdiff(colnames(integrated_data), 
-                                    c("Sample", "Group", 
-                                      "LVW_mg", 
-                                      "FS", "GLS", "HW_mg")))])
-
-# Calculating the correlation matrix
-cor_matrix <- cor(integrated_data[, c("HW_mg", 
-                            setdiff(colnames(integrated_data), 
-                                    c("Sample", "Group", 
-                                      "LVW_mg", 
-                                      "FS", "GLS", "HW_mg")))],
-                  use = "complete.obs")
-print(cor_matrix) 
-```
-
-## Model selection for linera regression
-# stepwise
-```{r}
+## Generalised regulation regression model
+```{r message=FALSE, warning=FALSE}
+library(glmnet)
 predictors <- setdiff(colnames(integrated_data), 
                       c("Sample", "Group", "LV_Thickness", 
                         "LVW_mg", "LVW_TL","HW_TL", "FS", "EF", "GLS", "HW_mg"))
 
-
-# formula_str_lm <- paste("HW_mg ~", paste(paste0("`", predictors, "`"), collapse = " + "))
-# Converting to formula
-
-formula_str_lm <- paste("HW_mg ~", paste(predictors, collapse = " + "))
-
-lm_formula <- as.formula(formula_str_lm)
-
-# Model
-lm_model <- lm(lm_formula, data = integrated_data)
-summary(lm_model)
-
-step(lm(HW_mg ~ 1, data = integrated_data), 
-     scope = lm_formula,
-     direction = "forward")
-```
-
-
-# selected model
-```{r}
-lm <- lm(HW_mg ~ Cholesterol + Adonitol + alpha_Ketoisovalerate_KIV + 
-    Citrate, data = integrated_data)
-par(mar = c(4, 4, 1, 1))
-plot(lm, pages = 1, scheme = 1)
-```
-
-
-## Generalisied Regression Analysis 
-```{r}
-library(glmnet)
-
-# Preparing data (converting to matrix)
+# Preparing data (converting to a matrix)
 x <- as.matrix(integrated_data[, predictors])
 y <- integrated_data$HW_mg
 
-# LASSO Regression (alpha = 0)
-fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian")
+full_data <- cbind(y, x)
+full_data <- na.omit(full_data)
+x_clean <- as.matrix(full_data[, -1])
+y_clean <- full_data[, 1]
 
-# Ridge Net Regression (alpha = 0.25)
-# fit_lasso <- cv.glmnet(x, y, alpha = 0, family = "gaussian", nfolds = 5)
+fit_lasso <- cv.glmnet(x_clean, y_clean, alpha = 0, family = "gaussian", nfolds = 5)
 
-summary(fit_lasso)
-
-# Coefficients
-coef(fit_lasso, s = "lambda.min")
-
-
-
-y_pred <- predict(fit_lasso, newx = x, s = "lambda.min")
-
-residuals <- y - y_pred
-rss <- sum(residuals^2)
-print(rss)
-
-mse <- mean(residuals^2)
-print(mse)
-
-rmse <- sqrt(mse)
-print(rmse)
-
-# Total Sum of Squares
-tss <- sum((y - mean(y))^2)  
-r_squared <- 1 - (rss / tss)
-print(r_squared)
-```
-
-## Combined Effect of Metabolites on Heart Weight
-```{r}
-fit_lasso 
-predicted_mass <- predict(fit_lasso, newx = x, s = "lambda.min")
+# summary(fit_lasso)
+# Extracting coefficients from  ridge model
 coefs <- as.matrix(coef(fit_lasso, s = "lambda.min"))
-coefs_df <- data.frame(Metabolites = rownames(coefs), Coef = as.numeric(coefs))
-coefs_df <- coefs_df[coefs_df$Metabolites != "(Intercept)", ]
+coefs_df <- data.frame(metabolites = rownames(coefs), Coef = as.numeric(coefs))
+intercept <- coefs[1, 1] # The predicted heart mass for a sample with average levels of all metabolites
+coefs_df <- coefs_df[coefs_df$metabolites != "(Intercept)", ]  # exclude intercept
 
-combined_effect_values <- as.vector(x %*% coefs_df$Coef)
 
+# Multiplying metabolite matrix (x) by coefficients to get the combined effect
+combined_effect_values <- as.vector(x %*% coefs_df$Coef + intercept)
+
+# Creating data frame with real HW_mg and combined effect
 combined_effect <- data.frame(
   Sample = seq_len(length(y)),
   Actual_HW_mg = as.numeric(y),
@@ -465,49 +227,167 @@ combined_effect <- data.frame(
 combined_effect$Sample <- serum2024$Sample
 combined_effect$group <- serum2024$Group
 
+# Plot actual heart mass vs. combined metabolite effect
 
-# ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg)) +
-#   geom_point(color = "steelblue", size = 3) +
-#   geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
-#   labs(x = "Combined Metabolite Effect (linear combination)", 
-#        y = "Actual Heart Mass (mg)",
-#        title = "Combined Effect of Metabolites on Heart Mass") +
-#   theme_minimal()
-
-
-
-p <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+p2 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
   geom_point(size = 3) +
-  geom_text_repel(aes(label = Sample), size = 4, max.overlaps = 100) +  # Sample labels
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +  # Sample labels
   geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
   labs(
-    x = "Combined Metabolite Effect (linear combination)",
+    x = "Combined metabolite Effect (linear combination)",
     y = "Heart Weight (mg)",
-    title = "Combined Effect of Metabolites on Heart Weight",
+    title = "Combined Effect of metabolites on Heart Weight",
     caption = "Samples labeled"
   ) + 
   scale_color_manual(
     name = "Group",
-    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC_V" = "#9467bd" ),
-    labels = c("Sham", "TAC", "TAC V")
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC-Tryptamine (Oral)" = "#2ca02c", 
+               "TAC Tryptamine (IP)" = "red","TAC Tryptophan" = "#9467bd"),
+    labels = c("Sham", "TAC", "TAC-Tryptamine (Oral)", "TAC-Tryptamine (IP)", "TAC Tryptophan")
   ) +
   theme_classic() +
   theme(
     text = element_text(family = "sans"),
     panel.background = element_blank(),
     panel.grid.major = element_line(color = "gray80", size = 0.5),
-    axis.title.x = element_text(size = 20, face = "italic", ),
-    axis.title.y = element_text(size = 20, face = "italic"),
+    axis.title.x = element_text(size = 15, face = "italic", ),
+    axis.title.y = element_text(size = 15, face = "italic"),
     axis.text.x = element_text(size = 8),
     axis.text.y = element_text(size = 8),
     legend.text = element_text(size = 8),
     legend.title = element_text(size = 10, face = "italic"),
     plot.caption = element_text(size = 8, face = "italic"),
-    plot.title = element_text(size = 30, face = "bold.italic")
+    plot.title = element_text(size = 20, face = "bold.italic")
   )
+p2
 
-# ggsave("E:/Ajit data analysis/Tac/serum 2022/Overall Effect of serum Metabolites on Heart Weight 2022 nfold 10.png",
-#         p,
-#         width = 16, height = 10,
-#         dpi = 400)
+ # ggsave("~/new analysis/serum 2024/Overall Effect of Metabolites on Heart Weight.png",
+ #        p2,
+ #        width = 9, height = 6.5,
+ #        dpi = 400)
+
+p3 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = group)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 4), se = TRUE) + 
+  geom_text_repel(aes(label = Sample), size = 2, max.overlaps = 100) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "darkred") +
+  labs(
+    x = "Combined Metabolite Effect (linear combination)",
+    y = "Heart Weight (mg)",
+    title = "Combined Effect of Metabolites on Heart Weight with CI",
+    caption = "Samples labeled"
+  ) + 
+  scale_color_manual(
+    name = "Group",
+    values = c("Sham" = "#1f77b4", "TAC" = "#ff7f0e", "TAC-Tryptamine (Oral)" = "#2ca02c", 
+               "TAC Tryptamine (IP)" = "red","TAC Tryptophan" = "#9467bd"),
+    labels = c("Sham", "TAC", "TAC-Tryptamine (Oral)", "TAC-Tryptamine (IP)", "TAC Tryptophan")
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(family = "sans"),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = "gray80", size = 0.5),
+    axis.title.x = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15, face = "italic"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10, face = "italic"),
+    plot.caption = element_text(size = 8, face = "italic"),
+    plot.title = element_text(size = 20, face = "bold.italic")
+  )
+p3
+
+# ggsave("~/new analysis/serum 2024/Overall Effect of Metabolites on Heart Weight each group range.png",
+#        p3,
+#        width = 10, height = 7,
+#        dpi = 400)
 ```
+
+
+## Boruta analysis 
+```{r message=FALSE, warning=FALSE}
+library(Boruta)
+set.seed(999)
+rf_data <- integrated_data[, c(predictors, "HW_mg")]
+rf_data <- na.omit(rf_data) 
+boruta_output <- Boruta(HW_mg ~ ., data = rf_data, doTrace = 2, maxRuns = 500, ntree = 1000)
+attribute_Boruta <- attStats(boruta_output)
+confirmed_var_serum2024 <- getSelectedAttributes(boruta_output, withTentative = FALSE)
+# kable(confirmed_var_serum2024, col.names = "IMPORTANT PRESDICTORS")
+
+boruta_list <- replicate(3, {
+  Boruta(HW_mg ~ ., data = rf_data, maxRuns = 500, ntree = 1000)
+}, simplify = FALSE)
+
+# confirmed metabolites from each run
+confirmed_lists <- lapply(boruta_list, function(b) {
+  rownames(attStats(b)[attStats(b)$decision == "Confirmed", ])
+})
+
+boruta_list
+vars_serum2024 <- Reduce(intersect, confirmed_lists)
+kable(vars_serum2024, col.names = "IMPORTANT PRESDICTORS")
+
+```
+
+* Boruta feature selection with 500 iterations confirmed 8 (`r vars_serum2024`) metabolites as statistically important over shadow variables. This method complements RF by offering a robust non-parametric significance test, reducing the risk of overfitting.
+
+## Important variable bar plot
+```{r message=FALSE, warning=FALSE}
+# par(mar = c(15, 4, 4, 4))
+# plot(boruta_output, las = 2, cex.axis = 0.8, cex.lab = 1, cex.main = 1, xlab = "", main = "Important Variable")
+
+# par(mfrow = c(2, 2))
+# for (i in 1:3) {
+#   plot(boruta_list[[i]], las = 2, cex.axis = 0.6, main = paste("Run", i))
+# }
+
+par(mar = c(15, 4, 4, 4))
+plot(boruta_list[[3]], las = 2, cex.axis = 0.8, cex.lab = 1, cex.main = 1, xlab = "", main = "Important Variable")
+
+# # Plot results
+# png("~/new analysis/serum 2024/final trend of metabolites.png",
+#     width = 30, height = 20, units = "in", res = 300)
+# par(mar = c(30, 10, 10, 10))
+# plot(boruta_list[[2]], las = 2, cex.axis = 1.5, cex.lab = 2, cex.main = 3, xlab = "", main = "Important Variable")
+# dev.off()
+```
+
+## Top 15 metabolites table.
+```{r}
+importance_serum2024 <- attStats(boruta_output)
+
+importance_serum2024 <- importance_serum2024[order(-importance_serum2024$meanImp), ]
+
+top15 <- head(importance_serum2024, 15)
+
+table_S2024 <- data.frame(
+  Serum_2024 = rownames(top15),
+  MeanImportance = top15$meanImp
+)
+
+print(table_S2024, row.names = FALSE)
+```
+
+## Checking Significant Metabolites using common Predictors of Boruta
+```{r, message=FALSE, warning=FALSE}
+library(mgcv)
+formula <- as.formula(paste("HW_mg ~", paste0("s(", vars_serum2024, ", by = Group)", collapse = " + ")))
+model_S2024 <- gam(formula, data = integrated_data, method = "REML", select  = TRUE)
+summary(model_S2024)
+
+# formula <- as.formula(paste("HW_mg ~", paste0("s(", confirmed_var_serum2024, ", by = Group)", collapse = " + ")))
+# model1 <- gam(formula, data = integrated_data, method = "REML", select  = TRUE)
+# summary(model1)
+```
+
+## Checking the common metabolite and microbiota present across the dataset.
+```{r}
+# common_metabolites <- Reduce(intersect, list(vars_fecal2022, vars_fecal2024))
+# common_microbe <- Reduce(intersect, list(vars_serum2022, vars_serum2024))
+```
+
+
+---
