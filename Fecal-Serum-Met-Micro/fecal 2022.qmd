@@ -38,9 +38,9 @@ library(ggrepel)
 
 
 ```{r echo=FALSE}
-# setwd("E:/Ajit data analysis/Tac") 
+# setwd("~/Tac") 
 
-Fecal1 <- read_excel("E:/Ajit data analysis/Tac/Fecal metablomics 2022 set 1.xlsx")
+Fecal1 <- read_excel("~/Fecal metablomics 2022 set 1.xlsx")
 
 metabolites <- colnames(Fecal1)[-c(1, 2)]
 clean_names <- gsub("[() ]", "_", metabolites)
@@ -103,7 +103,7 @@ pca_plot <- fviz_pca_ind(pca_result,
     panel.grid.major = element_line(color = "gray", size = 0.5), 
     panel.grid.minor = element_line(color = "gray", size = 0.25)  
   )
-# ggsave("E:/Ajit data analysis/Tac/fecal set1/pca_plot.png",
+# ggsave("~/fecal set1/pca_plot.png",
 #          width = 20, height = 15)
 pca_plot
 
@@ -114,7 +114,7 @@ plsda_result <- opls(scaled_Fecal1,
                     orthoI = 0)
 
 plsda_result
-# png("E:/Ajit data analysis/Tac/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
+# png("~/fecal set1/plsda_result.png", width = 20, height = 15, units = "in", res = 300)
 # plot(plsda_result)
 # 
 # dev.off()
@@ -142,7 +142,7 @@ plsda_plot <- ggplot(plsda_Fecal1, aes(x = p1, y = p2, color = Group)) +
   ) +
   scale_color_brewer(palette = "Set1")
 plsda_plot
-# ggsave("E:/Ajit data analysis/Tac/fecal set1/plsda_plot.png", width = 20, height = 15)
+# ggsave("~/fecal set1/plsda_plot.png", width = 20, height = 15)
 
 ```
 
@@ -208,23 +208,6 @@ visualize_correlation_heatmap <- function(cor_matrix, n_top = 30) {
   
   return(top_metabolites)
 }
-
-# Visualize correlation heatmap
-#top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 25)
-# ggsave("E:/Ajit data analysis/Tac/fecal set1/correlation_heatmap.png", 
-#        plot = top_var_metabolites, 
-#        width = 20, height = 15, 
-#        units = "in", 
-#        dpi = 600,  
-#        bg = "white") 
-
-# png("E:/Ajit data analysis/Tac/fecal set1/top_metabolite_corrplot.png", 
-#     width = 20, height = 15, 
-#     units = "in", res = 300)
-visualize_correlation_heatmap(cor_matrix, 30)
-
-# dev.off()
-
 ```
 
 ```{r include=FALSE}
@@ -262,14 +245,13 @@ visualize_correlation_heatmap <- function(cor_matrix, n_top = 30, save_path = NU
 
 top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 30, 
                                                      save_path = 
-                                                       "E:/Ajit data analysis/Tac/fecal set1/correlation_heatmap.pdf")
+                                                       "~/fecal set1/correlation_heatmap.pdf")
 visualize_correlation_heatmap(cor_matrix, 30)
 ```
 
 
 ## Group-specific correlation analysis (correlation)
 ```{r echo=FALSE}
-
 # Function to calculating group-specific correlation matrices
 group_correlation <- function(data, group) {
   # Filter data for specific group
@@ -391,7 +373,6 @@ plot_differential_correlation(diff_samVSfmt_V, c("Sham", "FMT_V"))
 ```
 
 ## Association Analysis(one-way ANOVA)
-
 ```{r echo=FALSE}
 # one-way ANOVA for each metabolite
 metabolite_anova <- function(data) {
@@ -480,9 +461,7 @@ plot_group_differences <- function(data, top_metabolites, n = 5) {
 plot_group_differences(Fecal1, anova_results, 20)
 ```
 
-
 ## Group-specific mean analysis
-
 ```{r echo=FALSE}
 # calculating group means for each metabolite
 group_means <- Fecal1 %>%
@@ -494,7 +473,7 @@ group_means <- Fecal1 %>%
             SE = sd(Value, na.rm = TRUE) / sqrt(n()),
             .groups = "drop")
 
-# metabolites with most different means between groups
+# metabolites with the most different means between groups
 find_different_means <- function(group_means, reference_group = "Sham") {
   # reference means
   ref_means <- group_means %>%
@@ -552,7 +531,7 @@ plot_mean_differences <- function(data, diff_means, n = 20) {
     )
 }
 
-# Plot top different metabolites
+# Plot the top different metabolites
 plot_mean_differences(data, diff_means, 20)
 ```
 
@@ -638,30 +617,9 @@ plot_covarying_metabolites <- function(Fecal1, covarying_pairs, n = 5) {
 # Plot co-varying metabolites
 plot_covarying_metabolites(Fecal1, covariation_results$covarying_pairs, 4)
 ```
-
+## Including mice information
 ```{r include=FALSE}
-# # Save results
-# write.csv(strong_cors, "strong_correlations.csv", row.names = FALSE)
-# write.csv(diff_cors, "differential_correlations_Sham_vs_TAC.csv", row.names = FALSE)
-# write.csv(anova_results, "metabolite_association_with_groups.csv", row.names = FALSE)
-# write.csv(cluster_analysis, "metabolite_clusters.csv", row.names = FALSE)
-# write.csv(diff_means, "fold_changes_vs_Sham.csv", row.names = FALSE)
-# write.csv(covariation_results$covarying_pairs, "covarying_metabolites.csv", row.names = FALSE)
-# 
-# # Save plots
-# ggsave("correlation_heatmap.png", width = 10, height = 8)
-# ggsave("differential_correlations.png", plot_differential_correlation(diff_cors, c("Sham", "TAC")), width = 10, height = 8)
-# ggsave("group_differences.png", plot_group_differences(data, anova_results, 6), width = 12, height = 8)
-# ggsave("correlation_network.png", all_network, width = 12, height = 10)
-# ggsave("mean_differences.png", plot_mean_differences(data, diff_means, 9), width = 12, height = 8)
-# ggsave("covarying_metabolites.png", plot_covarying_metabolites(data, covariation_results$covarying_pairs, 4), width = 12, height = 10)
-```
-
-
-
-
-```{r include=FALSE}
-mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+mice_info <- read_excel("~/Tac ready to use.xlsx", 
                         sheet = 6, 
                         range = "A2:N31",
                         col_names = TRUE)
@@ -677,10 +635,7 @@ integrated_data <- Fecal1 %>%
     Peak_LS = `Peak LS`,
     GLS = `GLS (%)`
   )
-
 colnames(mice_info)
-
-
 
 correlate_with_physio <- function(metabolite_data, physio_params) {
   results <- data.frame(
@@ -732,8 +687,6 @@ correlate_with_physio <- function(metabolite_data, physio_params) {
 
 # Specify physiological parameters to correlate with
 physio_params <- c("HW_mg", "LVW_mg", "LV_Thickness")
-
-
 
 # calculating correlations
 physio_correlations <- correlate_with_physio(integrated_data, physio_params)
@@ -919,43 +872,11 @@ for (param in physio_params) {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## New Analysis to understan overall effet of the metabolite on heart mass
+## New Analysis to understand the overall effect of the metabolite on heart mass
 ```{r}
-Fecal1 <- read_excel("E:/Ajit data analysis/Tac/Fecal metablomics 2022 set 1.xlsx")
+Fecal1 <- read_excel("~/Fecal metablomics 2022 set 1.xlsx")
 
 metabolites <- colnames(Fecal1)[-1]
-
 
 clean_names <- gsub("^_|_$", "", gsub("_+", "_", gsub("[-() ]", "_", metabolites)))
 
@@ -975,14 +896,15 @@ Fecal1 <- Fecal1 %>%
       grepl("WT-TAC-V", Sample) ~ "TAC_V",
       grepl("WT-TAC-", Sample) & !grepl("FMT", Sample) & !grepl("-V", Sample) ~ "TAC",
       TRUE ~ "Other"
-    ), .after = "Sample"
+    ), 
+.after = "Sample"
   ) %>% 
   mutate(Group = as.factor(Group))
 ```
 
 ## Mice info
 ```{r}
-mice_info <- read_excel("E:/Ajit data analysis/Tac/Tac ready to use.xlsx", 
+mice_info <- read_excel("~/Tac ready to use.xlsx", 
                         sheet = 6, 
                         range = "A2:N31",
                         col_names = TRUE)
@@ -1024,12 +946,6 @@ cor_matrix <- cor(integrated_data[, c("HW_mg",
 print(cor_matrix) 
 ```
 
-
-```{r}
-# write.csv(cor_matrix, "E:/Ajit data analysis/Tac/cor_matrix2.csv")
-```
-
-
 ```{r}
 corr_data <- integrated_data %>% select(-c(LV_Thickness, LVW_mg, LVW_TL, HW_TL,FS, EF, GLS))
 corr_data <- corr_data %>% column_to_rownames("Sample")
@@ -1060,8 +976,6 @@ visualize_correlation_heatmap <- function(cor_matrix, n_top = 30) {
 
 top_var_metabolites <- visualize_correlation_heatmap(cor_matrix, 30)
 visualize_correlation_heatmap(cor_matrix, 30)
-
-  
 ```
 
 ```{r}
@@ -1283,11 +1197,8 @@ lm_formula <- as.formula(formula_str_lm)
 
 # Model
 lm_model <- lm(lm_formula, data = integrated_data)
-
-
 summary(lm_model)
 ```
-
 
 ```{r}
 step(lm(HW_mg ~ 1, data = integrated_data), 
@@ -1498,7 +1409,7 @@ p <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = g
   )
 p
 
- # ggsave("E:/Ajit data analysis/Tac/fecal 2022/Overall Effect of Metabolites on Heart Weight nfold 10.png",
+ # ggsave("~/fecal 2022/Overall Effect of Metabolites on Heart Weight nfold 10.png",
  #        p,
  #        width = 9, height = 6.5,
  #        dpi = 400)
@@ -1534,25 +1445,6 @@ p2 <- ggplot(combined_effect, aes(x = CombinedEffect, y = Actual_HW_mg, color = 
   )
 p2
  
- # ggsave("E:/Ajit data analysis/Tac/fecal 2022/Overall Effect of Metabolites on Heart Weight 2022 nfold 5.png",
- #        p2,
- #        width = 16, height = 10,
- #        dpi = 400)
-
-
-
-
-
-
-
-
-# ( + theme(
-#     panel.background = element_blank(),      # Remove grey panel
-#     plot.background = element_blank(),       # Remove plot background
-#     panel.grid.major = element_blank(),      # Remove major gridlines
-#     panel.grid.minor = element_blank(),      # Remove minor gridlines
-#     axis.line = element_line(color = "black")  # Keep axis lines
-#   ))
 ```
 
 ```{r warning=FALSE, include=FALSE}
@@ -1651,8 +1543,6 @@ legend("topleft",
 ```
 
 
-
-
 ## Generalized Additive Model (GAM) \n Nonlinear relationships between metabolites and the mouse heart weight.
 ```{r}
 predictors <- setdiff(colnames(integrated_data), 
@@ -1677,41 +1567,7 @@ gam_model <- gam(HW_mg ~
 
 summary(gam_model)
 plot(gam_model, pages = 1, scheme = 1)
-
-
-par(mar = c(4, 4, 1, 1))  # bottom, left, top, right
-plot(gam_model, pages = 1, scheme = 1)
-
-# formula_str_gam <- paste("HW_mg ~", paste0("s(`", predictors, "`)", collapse = " + "))
-# 
-# # Convert string to formula
-# #paste("HW_mg ~", paste0("s(", paste0("`", predictors, "`"), ")", collapse = " + "))
-# 
-# formula_str_gam <- paste("HW_mg ~", paste0("s(`", predictors, "`)", collapse = " + "))
-# 
-# 
-# 
-# 
-# smooth_terms <- paste0("s(`", predictors, "`)")
-# rhs <- paste(smooth_terms, collapse = " + ")
-# 
-# formula_str_gam <- paste("HW_mg ~", rhs)
-# 
-# 
-# gam_formula <- as.formula(formula_str_gam, env = globalenv())
-# 
-# gam_model <- gam(gam_formula, data = integrated_data)
-
-
 ```
-
-```{r}
-summary(gam_model)
-plot(gam_model, pages = 1, scheme = 1)
-```
-
-
-
 
 ```{r}
 # visualize_sample_metabolite_correlation <- function(data, n_top = 29, save_path = NULL) {
@@ -1762,6 +1618,7 @@ plot(gam_model, pages = 1, scheme = 1)
 # visualize_sample_metabolite_correlation(corr_data, n_top = 30)
 
 ```
+
 
 
 
